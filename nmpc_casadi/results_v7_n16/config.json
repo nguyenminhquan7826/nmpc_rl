@@ -1,0 +1,76 @@
+{
+  "td_target": "n_step",
+  "critic_nsteps": 16,
+  "actor_advantage": "one_step_td",
+  "target_gradient": "stopped",
+  "critic_value": "-b(s)-e^T Qf(s) e, b>=0",
+  "b_scale": 1.0,
+  "b_init_raw": -4.0,
+  "fixed_terminal_multiplier": 50.0,
+  "actor_lr": 0.001,
+  "critic_lr": 0.003,
+  "rollout_steps": 256,
+  "eval_every": 10,
+  "Ts": 0.02,
+  "N": 10,
+  "seed": 0,
+  "seconds": 120,
+  "gamma": 0.99,
+  "sigma_fixed": 0.05,
+  "actor_lower": [
+    0.1,
+    0.1,
+    0.1
+  ],
+  "actor_upper": [
+    12.0,
+    8.0,
+    60.0
+  ],
+  "critic_bounds": [
+    0.5,
+    50.0
+  ],
+  "Q_INIT": [
+    12.0,
+    3.0,
+    50.0,
+    6.0,
+    70.75,
+    70.75
+  ],
+  "R_INIT": [
+    0.6,
+    70.0
+  ],
+  "QF_INIT": [
+    12.0,
+    3.0,
+    50.0,
+    6.0,
+    70.75,
+    70.75
+  ],
+  "Q_EVAL": [
+    12.0,
+    3.0,
+    50.0,
+    6.0,
+    70.75,
+    70.75
+  ],
+  "R_EVAL": [
+    0.6,
+    70.0
+  ],
+  "reward_weights_fixed": true,
+  "checkpoint_source": null,
+  "evaluation_controllers": [
+    "baseline",
+    "fixed_qf",
+    "actor_fixed_qf",
+    "critic_only",
+    "actor_critic"
+  ],
+  "selection_priority": "feasible, completed with solver >=99%, then tracking or return on nominal validation"
+}
