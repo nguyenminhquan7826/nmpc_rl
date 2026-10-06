@@ -109,6 +109,19 @@ def main():
             pd.DataFrame(results).to_csv(args.output/'comparison.csv',index=False)
             print(json.dumps(m),flush=True)
     import matplotlib.pyplot as plt
+    # Full CAD route, independent of how far any controller completed.
+    for name,_,_,_ in scenarios:
+        fig,ax=plt.subplots(figsize=(8,8))
+        ax.plot(rl.b.REF_INFO['cad_X'],rl.b.REF_INFO['cad_Y'],
+                'k--',linewidth=2,label='Reference')
+        for variant in ['frozen','frozen_explore','online']:
+            log=pd.read_csv(args.output/f'{name}_{variant}.csv')
+            line,=ax.plot(log.X,log.Y,linewidth=1.5,label=variant)
+            ax.scatter(log.X.iloc[0],log.Y.iloc[0],color=line.get_color(),marker='o',s=30)
+            ax.scatter(log.X.iloc[-1],log.Y.iloc[-1],color=line.get_color(),marker='x',s=60)
+        ax.set(xlabel='X [m]',ylabel='Y [m]',title=f'{name}: trajectories (o start, x last logged position)')
+        ax.set_aspect('equal',adjustable='box');ax.grid(alpha=.3);ax.legend()
+        fig.tight_layout();fig.savefig(args.output/f'{name}_trajectory.png',dpi=180);plt.close(fig)
     fig,axes=plt.subplots(2,1,figsize=(10,7),sharex=True)
     for variant in ['frozen','frozen_explore','online']:
         log=pd.read_csv(args.output/f'nominal_{variant}.csv')
