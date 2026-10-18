@@ -44,6 +44,12 @@ FLO, FHI = 0.5, 50.0
 #
 # log-multiplier penalty is symmetric in multiplicative space:
 #   multiplier 2.0 and 0.5 have the same |log(multiplier)|.
+# 
+
+#actor good
+#ACTOR_REG = np.array([0.05, 0.02, 0.01], dtype=float)
+#QF_REG = np.array([0.01, 0.01, 0.01, 0.01, 0.03, 0.03], dtype=float)
+
 ACTOR_REG = np.array([0.05, 0.02, 0.01], dtype=float)
 QF_REG = np.array([0.01, 0.01, 0.01, 0.01, 0.03, 0.03], dtype=float)
 

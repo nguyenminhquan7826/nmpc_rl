@@ -1,0 +1,189 @@
+{
+  "mode": "fixed_nmpc_vs_online_actor_critic_nmpc",
+  "checkpoint_source": "results_t1\\checkpoint.npz",
+  "checkpoint_metadata": {
+    "version": 9,
+    "td_target": "n_step",
+    "critic_nsteps": 16,
+    "actor_advantage": "one_step_td",
+    "critic_baseline": [
+      1.0,
+      -4.0
+    ],
+    "network_hidden_sizes": [
+      32,
+      32,
+      32,
+      32,
+      32
+    ],
+    "network_activation": "tanh",
+    "network_initializer": "xavier_uniform_hidden_zero_output",
+    "actor_regularizer": "log_multiplier_squared",
+    "qf_regularizer": "log_multiplier_squared",
+    "ACTOR_REG": [
+      0.05,
+      0.02,
+      0.01
+    ],
+    "QF_REG": [
+      0.01,
+      0.01,
+      0.01,
+      0.01,
+      0.03,
+      0.03
+    ],
+    "Q_INIT": [
+      12.0,
+      3.0,
+      50.0,
+      6.0,
+      100.75,
+      100.75
+    ],
+    "R_INIT": [
+      50.0,
+      10.0
+    ],
+    "QF_INIT": [
+      240.0,
+      60.0,
+      1000.0,
+      120.0,
+      2015.0,
+      2015.0
+    ],
+    "actor_lower": [
+      0.1,
+      0.1,
+      0.1
+    ],
+    "actor_upper": [
+      20.0,
+      15.0,
+      50.0
+    ],
+    "critic_bounds": [
+      0.5,
+      50.0
+    ],
+    "Q_BASE": [
+      12.0,
+      3.0,
+      50.0,
+      6.0,
+      100.75,
+      100.75
+    ],
+    "R_BASE": [
+      50.0,
+      10.0
+    ],
+    "Q_EVAL": [
+      20.0,
+      20.0,
+      100.0,
+      20.0,
+      600.0,
+      600.0
+    ],
+    "R_EVAL": [
+      50.0,
+      100.0
+    ],
+    "gamma": 0.99,
+    "Ts": 0.071,
+    "N": 10,
+    "sigma": 0.05,
+    "actor_lr": 0.008,
+    "critic_lr": 0.005,
+    "rng_state": {
+      "bit_generator": "PCG64",
+      "state": {
+        "state": 2722954282117398441311275912995537442,
+        "inc": 87136372517582989555478159403783844777
+      },
+      "has_uint32": 0,
+      "uinteger": 0
+    }
+  },
+  "controllers": [
+    "fixed_nmpc",
+    "ac_nmpc_online"
+  ],
+  "comparison_definition": {
+    "fixed_nmpc": "Pure NMPC baseline. Q/R/Qf = Environment.initial_weights for every sample. No Actor, no Critic, no neural-network inference, no online learning.",
+    "ac_nmpc_online": "Pretrained Actor-Critic checkpoint. Actor/Critic infer state-dependent Q/R/Qf every sample and both networks are updated online through agent.learn()."
+  },
+  "fixed_nmpc_weights": {
+    "Q": [
+      12.0,
+      3.0,
+      50.0,
+      6.0,
+      100.75,
+      100.75
+    ],
+    "R": [
+      50.0,
+      10.0
+    ],
+    "Qf": [
+      240.0,
+      60.0,
+      1000.0,
+      120.0,
+      2015.0,
+      2015.0
+    ]
+  },
+  "fairness": {
+    "same_initial_condition_per_scenario": true,
+    "same_time_varying_plant_profile": true,
+    "same_nmpc_internal_model": "b.p_nominal",
+    "checkpoint_reset_for_each_ac_scenario": true
+  },
+  "rollout_steps": 16,
+  "actor_lr": 0.001,
+  "critic_lr": 0.001,
+  "seconds": 120.0,
+  "seed": 0,
+  "Ts_s": 0.071,
+  "control_deadline_ms": 71.0,
+  "scenario_set": "physical",
+  "plant_parameter_order": [
+    "m",
+    "Iz",
+    "Cf",
+    "Cr",
+    "lf",
+    "lr",
+    "mu_roll",
+    "g",
+    "eps_v"
+  ],
+  "plant_mismatch": {
+    "controller_model": "Both controllers keep NMPC model b.p_nominal.",
+    "payload": {
+      "start_s": 30.0,
+      "ramp_s": 10.0,
+      "fractional_increase": 0.1,
+      "assumption": "m and Iz scale together so Iz/m is constant; CG, lf and lr unchanged"
+    },
+    "tire_segment": {
+      "start_s": 30.0,
+      "end_s": 60.0,
+      "transition_s": 5.0,
+      "effective_cornering_stiffness_drop": 0.2
+    },
+    "rolling_segment": {
+      "start_s": 30.0,
+      "end_s": 60.0,
+      "transition_s": 5.0,
+      "rolling_resistance_increase": 0.25,
+      "note": "mu_roll is the coefficient used in -mu*g, not tire-road friction mu"
+    }
+  },
+  "timing_note": "Fixed NMPC has policy_inference_ms=0 and learn_ms=0. AC-NMPC includes policy inference and online learning. Environment.step wall time includes simulated plant propagation, so timing is simulation-process timing rather than pure embedded WCET."
+}
