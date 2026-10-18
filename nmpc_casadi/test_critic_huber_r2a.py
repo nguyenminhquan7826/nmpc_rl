@@ -44,7 +44,10 @@ class CriticHuberR2ATests(unittest.TestCase):
 
     def test_numeric_derivative_sign_and_scale(self):
         target = -3000.0
-        for value in [-3050.0, -3002.0, -2800.0]:
+        # Avoid TD exactly at Huber's quadratic/linear boundary (|TD|=50):
+        # centered finite differences straddle the kink in curvature and
+        # introduce an O(step) truncation error even with a correct gradient.
+        for value in [-3051.0, -3002.0, -2800.0]:
             step = 1e-4
 
             def objective(v):
