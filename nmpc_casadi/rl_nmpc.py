@@ -27,6 +27,55 @@ QF_INIT = 20.0 * Q_INIT
 # Keep reward weights unchanged when comparing different initial controllers.
 Q_EVAL = np.array([20., 20., 100., 20., 600, 600])
 R_EVAL = np.array([50, 100.])
+
+# R1: fixed task reward + penalty for true catastrophic termination.
+# Actor/Critic objectives, regularizers, and multiplier bounds stay unchanged.
+REWARD_SCHEME = "fixed_eval_progress_failure_v1"
+SOLVER_FAIL_STEP_COST = 10.0
+FAIL_TERMINAL_BASE = 1000.0
+FAIL_TERMINAL_REMAINING = 2000.0
+
+
+def failure_cost_at_progress(progress_fraction):
+    """Charge only on true failure; successful finish/time truncation pay zero."""
+    p = float(progress_fraction)
+    if not np.isfinite(p):
+        raise ValueError("Nonfinite route progress in failure terminal penalty")
+    p = float(np.clip(p, 0.0, 1.0))
+    return FAIL_TERMINAL_BASE + FAIL_TERMINAL_REMAINING * (1.0 - p)
+
+
+def classify_termination(reached_candidate, invalid_state, solver_fail_count, time_limit):
+    """A catastrophic failure overrides route completion in the same step."""
+    failure = bool(invalid_state or solver_fail_count >= 3)
+    reached = bool(reached_candidate and not failure)
+    terminated = bool(reached or failure)
+    truncated = bool(time_limit and not terminated)
+    reason = (
+        "invalid_state" if invalid_state else
+        "solver_fail_3x" if solver_fail_count >= 3 else
+        "reached_end" if reached else
+        "time_limit_truncation" if truncated else
+        "running"
+    )
+    return failure, reached, terminated, truncated, reason
+
+
+def reward_breakdown(e, du, success, catastrophic_failure, progress_fraction):
+    state_cost = float(np.sum(Q_EVAL * np.asarray(e, dtype=float)**2))
+    control_cost = float(np.sum(R_EVAL * np.asarray(du, dtype=float)**2))
+    solver_fail_cost = 0.0 if success else SOLVER_FAIL_STEP_COST
+    failure_cost = (
+        failure_cost_at_progress(progress_fraction) if catastrophic_failure else 0.0
+    )
+    return {
+        "state_cost": state_cost,
+        "control_cost": control_cost,
+        "solver_fail_cost": solver_fail_cost,
+        "terminal_failure_cost": failure_cost,
+        "reward": -(state_cost + control_cost + solver_fail_cost + failure_cost),
+    }
+
 Q_BASE = Q_INIT.copy()
 R_BASE = R_INIT.copy()
 F_BASE = QF_INIT.copy()
@@ -391,7 +440,7 @@ class Agent:
         }
 
     def _meta(self):
-        return {'version':9,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
+        return {'version':10,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
                 'network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,
                 'network_initializer':NN_INITIALIZER,
                 'actor_regularizer':'log_multiplier_squared',
@@ -480,43 +529,70 @@ class Environment:
         progress_before=ref['projection']['s']
         p=pack_parameters(self.x,self.prev,ref['xref'],b.p_nominal,weights)
         start=time.perf_counter(); success=False; primary=False; violation=np.inf
+        solver_attempt_details=[]
         for attempt in range(2):
+            violation=np.inf
             guess=self.guess if attempt==0 else b.build_fresh_dynamics_rollout_guess(self.rm,self.x,self.prev,ref)
             try:
                 sol=self.problem['solver'](x0=guess,p=p,lbx=self.problem['lbx'],ubx=self.problem['ubx'],lbg=self.problem['lbg'],ubg=self.problem['ubg'])
                 z=np.asarray(sol['x']).ravel(); g=np.asarray(sol['g']).ravel()
                 violation=max(float(np.max(np.maximum(self.problem['lbx']-z,0))),float(np.max(np.maximum(z-self.problem['ubx'],0))),float(np.max(np.maximum(self.problem['lbg']-g,0))),float(np.max(np.maximum(g-self.problem['ubg'],0))))
-                success=bool(self.problem['solver'].stats().get('success',False)) and np.all(np.isfinite(z)) and violation<=1e-6
+                stats=self.problem['solver'].stats()
+                success=bool(stats.get('success',False)) and np.all(np.isfinite(z)) and np.isfinite(violation) and violation<=1e-6
+                solver_attempt_details.append(f"try{attempt+1}:{stats.get('return_status','unknown')}:violation={violation:.3e}")
                 if success:
                     primary=attempt==0; xs,us=unpack_solution(z,b.N); u=us[:,0].copy(); self.guess=shift_warm_start(xs,us); break
-            except Exception:
+            except Exception as exc:
                 success=False
+                solver_attempt_details.append(f"try{attempt+1}:{type(exc).__name__}:{str(exc)[:300]}")
         elapsed=(time.perf_counter()-start)*1000
         if not success:u=self.prev.copy()
         self.fail=0 if success else self.fail+1
         du=u-self.prev
-        # Reward uses FIXED baseline matrices and same pre-action error convention as baseline.
-        reward=-float(np.sum(Q_EVAL*e**2)+np.sum(R_EVAL*du**2))-(10 if not success else 0)
-        self.x=np.asarray(b.Fd_plant(self.x,u,self.plant)).ravel(); self.prev=u.copy(); self.k+=1
+        # Reward uses the SAME fixed evaluation weights as the prior training.
+        # Determine termination after plant propagation and before charging penalty.
+        self.x=np.asarray(b.Fd_plant(self.x,u,self.plant)).ravel()
+        self.prev=u.copy()
+        self.k+=1
         invalid=not np.all(np.isfinite(self.x))
-        if invalid:self.x=old.copy(); reward-=100
+        if invalid:self.x=old.copy()  # keep last finite state for projection/logging
         sn,en=self.observe()
-        reached=self.ref['projection']['s']>=b.CAD_S_END-.03
-        # End of route is task termination; time cap is truncation and bootstraps.
-        terminated=bool(reached or invalid or self.fail>=3)
-        if self.fail>=3:reward-=100
-        done=terminated or self.k>=self.limit
-        row={'t_s':(self.k-1)*b.Ts,'X':old[4],'Y':old[5],'X_ref':ref['xref'][0,4],'Y_ref':ref['xref'][0,5], 'cte_m':ref['projection']['distance'],'e_psi':e[2],'e_vx':e[0],'reward':reward,'solver_success':int(success),'primary_success':int(primary),'constraint_violation':violation,'solve_ms':elapsed,'a':u[0],'delta':u[1],'du_a':du[0],'du_delta':du[1],
-             'progress_before_m':progress_before,           # progress at the observation used for this action
-             'progress_m':self.ref['projection']['s'],       # progress AFTER the step (used for completion)
+        progress_after=float(self.ref['projection']['s'])
+        progress_fraction=float(np.clip(progress_after/max(float(b.CAD_S_END),1e-12),0.,1.))
+        catastrophic,reached,terminated,truncated,termination_reason=classify_termination(
+            progress_after>=b.CAD_S_END-.03,invalid,self.fail,self.k>=self.limit
+        )
+        costs=reward_breakdown(e,du,success,catastrophic,progress_fraction)
+        done=bool(terminated or truncated)
+
+        row={'t_s':(self.k-1)*b.Ts,'X':old[4],'Y':old[5],
+             'X_ref':ref['xref'][0,4],'Y_ref':ref['xref'][0,5],
+             'cte_m':ref['projection']['distance'],'e_psi':e[2],'e_vx':e[0],
+             'reward':costs['reward'],'solver_success':int(success),
+             'primary_success':int(primary),'constraint_violation':violation,
+             'solve_ms':elapsed,'solver_attempt_count':len(solver_attempt_details),
+             'solver_attempt_details':' | '.join(solver_attempt_details),
+             'a':u[0],'delta':u[1],'du_a':du[0],'du_delta':du[1],
+             'progress_before_m':progress_before,'progress_m':progress_after,
+             'progress_fraction':progress_fraction,
+             'state_cost':costs['state_cost'],'control_cost':costs['control_cost'],
+             'solver_fail_cost':costs['solver_fail_cost'],
+             'terminal_failure_cost':costs['terminal_failure_cost'],
+             'failure_terminal':int(catastrophic),'time_limit_truncated':int(truncated),
+             'termination_reason':termination_reason,
              'reached_end':int(reached),'terminated':int(terminated)}
-        for name,w in zip(['q','r','qf'],weights):row.update({f'{name}_{i}':float(v) for i,v in enumerate(w)})
+        for name,w in zip(['q','r','qf'],weights):
+            row.update({f'{name}_{i}':float(v) for i,v in enumerate(w)})
         self.logs.append(row)
-        return sn,en,reward,done,terminated
+        return sn,en,costs['reward'],done,terminated
 
 def metrics(log):
     d=pd.DataFrame(log)
     result = {'return':float(d.reward.sum()),'mean_cte_m':float(d.cte_m.mean()),'max_cte_m':float(d.cte_m.max()),'rmse_heading_rad':float(np.sqrt(np.mean(d.e_psi**2))), 'rmse_vx_mps':float(np.sqrt(np.mean(d.e_vx**2))),'solver_success_pct':float(100*d.solver_success.mean()),'solve_p95_ms':float(d.solve_ms.quantile(.95)),'completion_pct':float(100*d.progress_m.iloc[-1]/b.CAD_S_END),'reached_end':bool(d.reached_end.iloc[-1]),'terminated':bool(d.terminated.iloc[-1]),'mean_du_delta_sq':float(np.mean(d.du_delta**2))}
+    result['termination_reason']=str(d.termination_reason.iloc[-1])
+    result['failure_terminal']=bool(d.failure_terminal.iloc[-1])
+    result['terminal_failure_cost_total']=float(d.terminal_failure_cost.sum())
+    result['solver_failed_steps']=int((d.solver_success==0).sum())
     post=d[d.progress_before_m>=1.3]   # same sample selection as v5 (pre-step progress)
     result['post_sample_count']=len(post)
     result['mean_cte_post_m']=float(post.cte_m.mean()) if len(post) else np.nan
@@ -611,7 +687,7 @@ def main():
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('evaluate requires --checkpoint')
     env=Environment(args.seconds); agent=Agent(args.seed,SIGMA if args.sigma is None else args.sigma,args.actor_lr,args.critic_lr,args.critic_nsteps)
     if args.checkpoint:agent.load(args.checkpoint,sigma_override=args.sigma)
-    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
+    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
     (args.output/'config.json').write_text(json.dumps(config,indent=2))
     if args.mode in ['train','smoke']:
         history=[];validation=[];update_history=[];total_updates=0;best_keys={};best_records={}
