@@ -1,11 +1,11 @@
 """NumPy Actor-Critic with n-step Critic and one-step Actor; no differentiation through NMPC.
 
-v7: configurable n-step Critic targets; Actor keeps one-step TD.
+v9-5x32-reg: five 32-neuron tanh hidden layers with separate Actor/Qf regularization around nominal multipliers.
 The v6 value baseline is preserved: the critic value is
     V(s) = -b(s) - e' diag(F_BASE * m(s)) e ,   b(s) = B_SCALE * softplus(raw_6) >= 0
 so the value can represent cost that is not explained by terminal-weight energy
 (du^2 penalty, accumulated future tracking cost), while keeping V <= 0 like the reward.
-Reward, learning rates, rollout length and actor update are unchanged.
+The task reward remains common to Actor and Critic; separate regularizers control how far Actor Q/R and Critic Qf multipliers move from nominal.
 Also: sample-weighted update metrics, post-step progress logging, optimizer state in checkpoint,
 CLI --sigma overrides checkpoint only when explicitly supplied.
 Diagnostics distinguish quadratic energy from the full critic value.
@@ -20,20 +20,33 @@ from nmpc_casadi import build_nmpc_solver, pack_parameters, unpack_solution, shi
 ROOT = Path(__file__).resolve().parent
 # EDIT ONLY THESE THREE ARRAYS to choose the initial controller.
 # State order: vx, vy, psi, r, X, Y; input increment order: a, delta.
-Q_INIT = np.array([12., 3., 50., 6., 70.75, 70.75])
-R_INIT = np.array([0.6, 70.])
-QF_INIT = np.array([12., 3., 50., 6., 70.75, 70.75])
+Q_INIT = np.array([12., 3., 50., 6., 100.75, 100.75])
+R_INIT = np.array([50., 10.])
+QF_INIT = 20.0 * Q_INIT
 
 # Keep reward weights unchanged when comparing different initial controllers.
-Q_EVAL = np.array([12., 3., 50., 6., 70.75, 70.75])
-R_EVAL = np.array([0.6, 70.])
+Q_EVAL = np.array([20., 20., 100., 20., 600, 600])
+R_EVAL = np.array([50, 100.])
 Q_BASE = Q_INIT.copy()
 R_BASE = R_INIT.copy()
 F_BASE = QF_INIT.copy()
 # Multipliers now relative to YOUR initial weights; initial multiplier = 1.
 LO = np.array([0.1, 0.1, 0.1])
-HI = np.array([12., 8., 60.])
+HI = np.array([20., 15., 50.])
 FLO, FHI = 0.5, 50.0
+
+# Separate adaptation regularization.
+# These DO NOT change the task reward. They only penalize moving the learned
+# NMPC multipliers too far from their nominal value 1.0.
+#
+# Actor order: [alpha_pos (Q_X,Q_Y), alpha_psi (Q_psi), beta_delta (R_delta)]
+# Critic order: [m_Qf_vx, m_Qf_vy, m_Qf_psi, m_Qf_r, m_Qf_X, m_Qf_Y]
+#
+# log-multiplier penalty is symmetric in multiplicative space:
+#   multiplier 2.0 and 0.5 have the same |log(multiplier)|.
+ACTOR_REG = np.array([0.05, 0.02, 0.01], dtype=float)
+QF_REG = np.array([0.01, 0.01, 0.01, 0.01, 0.03, 0.03], dtype=float)
+
 # Non-negative value baseline b(s) = B_SCALE*softplus(raw); starts ~0.018 so initial V ~ old V.
 B_SCALE = 1.0
 B_INIT_RAW = -4.0
@@ -47,6 +60,13 @@ def initial_weights():
 SCALE = np.array([.1,.06,.2,.5,.1,.1,.1,2.,.55,2.,2.,1.])
 GAMMA = .99
 SIGMA = .05  # reduced for the wider action domain; configurable with --sigma
+
+# Neural-network architecture study.
+# Actor : 12 -> 32 -> 32 -> 32 -> 32 -> 32 -> 3
+# Critic: 12 -> 32 -> 32 -> 32 -> 32 -> 32 -> 7
+HIDDEN_SIZES = (32, 32, 32, 32, 32)
+NN_ACTIVATION = 'tanh'
+NN_INITIALIZER = 'xavier_uniform_hidden_zero_output'
 
 def sigmoid(z):
     return 1 / (1 + np.exp(-np.clip(z,-40,40)))
@@ -78,30 +98,110 @@ def n_step_targets(reward, next_values, terminated, steps, gamma=GAMMA):
 
 
 class MLP:
-    def __init__(self, rng, outputs, bias):
-        self.p = [rng.normal(0,.1,(12,32)), np.zeros(32),
-                  np.zeros((32,outputs)), np.asarray(bias,dtype=float)]
+    """Fully-connected tanh MLP with five 32-neuron hidden layers."""
+    def __init__(self, rng, outputs, bias, hidden_sizes=HIDDEN_SIZES):
+        self.hidden_sizes = tuple(int(x) for x in hidden_sizes)
+        if len(self.hidden_sizes) < 1 or any(x < 1 for x in self.hidden_sizes):
+            raise ValueError('hidden_sizes must contain positive integers')
+
+        dims = (12,) + self.hidden_sizes
+        self.p = []
+
+        # Hidden layers: Xavier-uniform initialization + zero bias.
+        for nin, nout in zip(dims[:-1], dims[1:]):
+            limit = np.sqrt(6.0 / (nin + nout))
+            W = rng.uniform(-limit, limit, size=(nin, nout))
+            b0 = np.zeros(nout)
+            self.p.extend([W, b0])
+
+        # Output weights start at zero so initial Q/R/Qf stay exactly as in v7.
+        out_bias = np.asarray(bias, dtype=float)
+        if out_bias.shape != (outputs,):
+            raise ValueError(f'Output bias must have shape ({outputs},)')
+        self.p.extend([
+            np.zeros((dims[-1], outputs)),
+            out_bias.copy(),
+        ])
+
         self.m = [np.zeros_like(x) for x in self.p]
         self.v = [np.zeros_like(x) for x in self.p]
         self.t = 0
+
+    @property
+    def n_hidden(self):
+        return len(self.hidden_sizes)
+
+    def _hidden_forward(self, s):
+        a = np.asarray(s, dtype=float)
+        activations = [a]
+        for layer in range(self.n_hidden):
+            W = self.p[2*layer]
+            b0 = self.p[2*layer + 1]
+            a = np.tanh(a @ W + b0)
+            activations.append(a)
+        return activations
+
     def forward(self, s):
-        h = np.tanh(np.asarray(s) @ self.p[0] + self.p[1])
-        return h @ self.p[2] + self.p[3], h
+        activations = self._hidden_forward(s)
+        h = activations[-1]
+        return h @ self.p[-2] + self.p[-1], h
+
     def grads(self, s, dz):
-        _,h = self.forward(s)
-        dh = (dz @ self.p[2].T) * (1-h*h)
-        return [s.T@dh, dh.sum(0), h.T@dz, dz.sum(0)]
+        s = np.asarray(s, dtype=float)
+        dz = np.asarray(dz, dtype=float)
+        if s.ndim != 2 or dz.ndim != 2:
+            raise ValueError('grads expects batched 2-D s and dz arrays')
+
+        activations = self._hidden_forward(s)
+        grads = [None] * len(self.p)
+
+        # Output layer gradients.
+        grads[-2] = activations[-1].T @ dz
+        grads[-1] = dz.sum(axis=0)
+        dh = dz @ self.p[-2].T
+
+        # Hidden layers, backpropagated from layer 5 to layer 1.
+        for layer in range(self.n_hidden - 1, -1, -1):
+            h = activations[layer + 1]
+            inp = activations[layer]
+            da = dh * (1.0 - h*h)
+
+            wi = 2*layer
+            bi = wi + 1
+            grads[wi] = inp.T @ da
+            grads[bi] = da.sum(axis=0)
+
+            if layer > 0:
+                dh = da @ self.p[wi].T
+
+        return grads
+
     def update(self, grads, lr):
-        before=[x.copy() for x in self.p]
+        if len(grads) != len(self.p):
+            raise ValueError('Gradient/parameter count mismatch')
+
+        before = [x.copy() for x in self.p]
         norm = np.sqrt(sum(np.sum(g*g) for g in grads))
-        factor = min(1., 1./max(norm,1e-12))
+        factor = min(1., 1./max(norm, 1e-12))
         self.t += 1
-        for i,g in enumerate(grads):
-            g = g*factor
-            self.m[i] = .9*self.m[i]+.1*g
-            self.v[i] = .999*self.v[i]+.001*g*g
-            self.p[i] -= lr*(self.m[i]/(1-.9**self.t))/(np.sqrt(self.v[i]/(1-.999**self.t))+1e-8)
-        return {'grad_norm':float(norm),'clip_factor':float(factor),'parameter_delta':float(np.sqrt(sum(np.sum((x-y)**2) for x,y in zip(self.p,before))))}
+
+        for i, g in enumerate(grads):
+            g = g * factor
+            self.m[i] = .9*self.m[i] + .1*g
+            self.v[i] = .999*self.v[i] + .001*g*g
+            self.p[i] -= lr * (
+                self.m[i] / (1 - .9**self.t)
+            ) / (
+                np.sqrt(self.v[i] / (1 - .999**self.t)) + 1e-8
+            )
+
+        return {
+            'grad_norm': float(norm),
+            'clip_factor': float(factor),
+            'parameter_delta': float(np.sqrt(
+                sum(np.sum((x-y)**2) for x, y in zip(self.p, before))
+            )),
+        }
 
 class Agent:
     def __init__(self, seed=0, sigma=SIGMA, actor_lr=1e-3, critic_lr=3e-3, critic_nsteps=16):
@@ -112,6 +212,10 @@ class Agent:
         if not np.all(np.isfinite([self.actor_lr,self.critic_lr])) or min(self.actor_lr,self.critic_lr)<=0: raise ValueError("learning rates must be positive")
         self.sigma=float(sigma)
         if not np.isfinite(self.sigma) or self.sigma<=0: raise ValueError('sigma must be positive')
+        if ACTOR_REG.shape != (3,) or np.any(~np.isfinite(ACTOR_REG)) or np.any(ACTOR_REG < 0):
+            raise ValueError('ACTOR_REG must contain 3 finite non-negative values')
+        if QF_REG.shape != (6,) or np.any(~np.isfinite(QF_REG)) or np.any(QF_REG < 0):
+            raise ValueError('QF_REG must contain 6 finite non-negative values')
         q,r,f=initial_weights()
         alpha=np.array([q[4]/Q_BASE[4],q[2]/Q_BASE[2],r[1]/R_BASE[1]])
         if not np.all(np.isfinite(alpha)) or np.any(HI <= LO) or np.any(alpha <= LO) or np.any(alpha >= HI):
@@ -144,50 +248,155 @@ class Agent:
         return -base-np.sum(e*e*F_BASE*mult,axis=-1)
     def learn(self,rows):
         s,e,z,reward,sn,en,done=map(np.asarray,zip(*rows))
+        batch_n=max(len(s),1)
+
+        # ================================================================
+        # Critic: common task return + Qf multiplier regularization
+        # ================================================================
         mult,sig,base,raw=self.critic_terms(s)
         v=-base-np.sum(e*e*F_BASE*mult,axis=-1)
+
         # Both numeric targets are frozen before either network is updated.
         next_values=self.value(sn,en)
         actor_td=reward+GAMMA*(1-done)*next_values-v
         target,horizons=n_step_targets(reward,next_values,done,self.critic_nsteps)
+
         energy=np.sum(e*e*F_BASE,axis=1)
-        # Range reachable by terminal-weight energy alone; b(s) is needed once target < vmin.
         vmin=-FHI*energy;vmax=-FLO*energy
         tol=1e-9*(1+np.abs(target))
         below=target<vmin-tol;above=target>vmax+tol
         td=target-v
+
+        # dV/d(raw critic output)
         dv=np.empty((len(s),7))
-        dv[:,:6]=-e*e*F_BASE*(FHI-FLO)*sig*(1-sig)
-        dv[:,6]=-B_SCALE*sigmoid(raw[:,6])      # d(-b)/d raw = -B_SCALE*sigmoid(raw)
+        dm_draw=(FHI-FLO)*sig*(1-sig)
+        dv[:,:6]=-e*e*F_BASE*dm_draw
+        dv[:,6]=-B_SCALE*sigmoid(raw[:,6])
+
+        # TD/MSE gradient: d[0.5*(target-V)^2]/d(raw)
+        critic_raw_grad=(-td[:,None]*dv)/batch_n
+
+        # Qf regularizer:
+        #   L_qf_reg = mean(sum_i lambda_i * log(m_i)^2)
+        #
+        # This keeps the Critic tied to the SAME task reward/return, but gives
+        # us a separate knob controlling how far each Qf multiplier may drift
+        # from nominal m_i = 1.
+        safe_mult=np.maximum(mult,1e-12)
+        qf_reg_per_sample=np.sum(QF_REG*(np.log(safe_mult)**2),axis=1)
+        qf_reg_loss=float(np.mean(qf_reg_per_sample))
+        qf_reg_raw=np.zeros((len(s),7))
+        qf_reg_raw[:,:6]=(
+            2.0*QF_REG*np.log(safe_mult)/safe_mult*dm_draw
+        )/batch_n
+        critic_total_raw_grad=critic_raw_grad+qf_reg_raw
+
         near_upper=mult>=FHI-.01*(FHI-FLO)
         near_lower=mult<=FLO+.01*(FHI-FLO)
-        gc=self.critic.update(self.critic.grads(s,(-td[:,None]*dv)/len(s)),self.critic_lr)
+        gc=self.critic.update(
+            self.critic.grads(s,critic_total_raw_grad),
+            self.critic_lr
+        )
+
+        # ================================================================
+        # Actor: policy-gradient objective + Q/R multiplier regularization
+        # ================================================================
         mu,_=self.actor.forward(s)
+
         # Scale only; do not center away the sign of the estimated advantage.
         advantage=actor_td/max(float(np.std(actor_td)),1.)
-        dz=-advantage[:,None]*(z-mu)/(self.sigma**2)/len(s)
-        ga=self.actor.update(self.actor.grads(s,dz),self.actor_lr)
-        logp=-.5*np.sum(((z-mu)/self.sigma)**2+2*np.log(self.sigma)+np.log(2*np.pi),axis=1)
-        return {'critic_target_horizon_mean':float(horizons.mean()),
-                'critic_target_horizon_min':int(horizons.min()),'critic_target_horizon_max':int(horizons.max()),
+
+        # Vanilla Gaussian score-function gradient wrt policy mean.
+        dloss_dmu=(
+            -advantage[:,None]*(z-mu)/(self.sigma**2)
+        )/batch_n
+
+        # Regularize the DETERMINISTIC policy center, not the random sample.
+        # mean_mult is the bounded multiplier obtained from mu:
+        #   [alpha_pos, alpha_psi, beta_delta]
+        tanh_mu=np.tanh(mu)
+        mean_mult=LO+(HI-LO)*(tanh_mu+1.0)/2.0
+        safe_actor_mult=np.maximum(mean_mult,1e-12)
+
+        #   L_actor_reg = mean(sum_j lambda_j * log(alpha_j)^2)
+        actor_reg_per_sample=np.sum(
+            ACTOR_REG*(np.log(safe_actor_mult)**2),axis=1
+        )
+        actor_reg_loss=float(np.mean(actor_reg_per_sample))
+
+        # d multiplier / d mu for the bounded tanh mapping.
+        dmult_dmu=0.5*(HI-LO)*(1.0-tanh_mu*tanh_mu)
+        actor_reg_dmu=(
+            2.0*ACTOR_REG*np.log(safe_actor_mult)/safe_actor_mult*dmult_dmu
+        )/batch_n
+
+        actor_total_dmu=dloss_dmu+actor_reg_dmu
+        ga=self.actor.update(self.actor.grads(s,actor_total_dmu),self.actor_lr)
+
+        # Logging only: Gaussian policy loss (same definition as before).
+        logp=-.5*np.sum(
+            ((z-mu)/self.sigma)**2
+            +2*np.log(self.sigma)
+            +np.log(2*np.pi),
+            axis=1
+        )
+        actor_pg_loss=float(np.mean(-advantage*logp))
+        critic_td_loss=float(np.mean(td*td)/2)
+
+        return {
+                'critic_target_horizon_mean':float(horizons.mean()),
+                'critic_target_horizon_min':int(horizons.min()),
+                'critic_target_horizon_max':int(horizons.max()),
                 'critic_full_nstep_pct':float(100*np.mean(horizons==self.critic_nsteps)),
-                'actor_td_mean':float(actor_td.mean()),'actor_td_rms':float(np.sqrt(np.mean(actor_td**2))),
-                'critic_loss':float(np.mean(td*td)/2),'actor_loss':float(np.mean(-advantage*logp)),
+
+                'actor_td_mean':float(actor_td.mean()),
+                'actor_td_rms':float(np.sqrt(np.mean(actor_td**2))),
+                'td_mean':float(td.mean()),
+                'td_rms':float(np.sqrt(np.mean(td*td))),
+
+                # Preserve old loss names for comparison with previous runs.
+                'critic_loss':critic_td_loss,
+                'actor_loss':actor_pg_loss,
+
+                # New separated loss diagnostics.
+                'critic_td_loss':critic_td_loss,
+                'critic_qf_reg_loss':qf_reg_loss,
+                'critic_loss_total':critic_td_loss+qf_reg_loss,
+                'actor_pg_loss':actor_pg_loss,
+                'actor_reg_loss':actor_reg_loss,
+                'actor_loss_total':actor_pg_loss+actor_reg_loss,
+                'actor_reg_grad_mu_norm':float(np.linalg.norm(actor_reg_dmu)),
+                'critic_reg_grad_raw_norm':float(np.linalg.norm(qf_reg_raw)),
+
+                **{f'actor_mean_multiplier_{i}':float(mean_mult[:,i].mean()) for i in range(3)},
+
                 'target_below_quadratic_min_pct':float(100*below.mean()),
                 'target_above_quadratic_max_pct':float(100*above.mean()),
                 'target_outside_quadratic_range_pct':float(100*(below|above).mean()),
-                'quadratic_min_mean':float(vmin.mean()),'quadratic_max_mean':float(vmax.mean()),
+                'quadratic_min_mean':float(vmin.mean()),
+                'quadratic_max_mean':float(vmax.mean()),
                 'target_above_full_value_upper_pct':float(100*above.mean()),
                 'critic_near_upper_pct':float(100*near_upper.mean()),
                 'critic_near_lower_pct':float(100*near_lower.mean()),
-                'baseline_b_mean':float(base.mean()),'baseline_b_max':float(base.max()),
-                'baseline_share_of_value_pct':float(100*base.mean()/max(float(np.mean(-v)),1e-12)),
+                'baseline_b_mean':float(base.mean()),
+                'baseline_b_max':float(base.max()),
+                'baseline_share_of_value_pct':float(
+                    100*base.mean()/max(float(np.mean(-v)),1e-12)
+                ),
                 **{f'qf_multiplier_{i}_mean':float(mult[:,i].mean()) for i in range(6)},
-                'td_mean':float(td.mean()),'td_rms':float(np.sqrt(np.mean(td*td))),
-                'value_mean':float(v.mean()),'target_mean':float(target.mean()),
-                **{'actor_'+k:x for k,x in ga.items()},**{'critic_'+k:x for k,x in gc.items()}}
+                'value_mean':float(v.mean()),
+                'target_mean':float(target.mean()),
+                **{'actor_'+k:x for k,x in ga.items()},
+                **{'critic_'+k:x for k,x in gc.items()}
+        }
+
     def _meta(self):
-        return {'version':7,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
+        return {'version':9,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
+                'network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,
+                'network_initializer':NN_INITIALIZER,
+                'actor_regularizer':'log_multiplier_squared',
+                'qf_regularizer':'log_multiplier_squared',
+                'ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),
                 'Q_INIT':Q_INIT.tolist(),'R_INIT':R_INIT.tolist(),'QF_INIT':QF_INIT.tolist(),
                 'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],
                 'Q_BASE':Q_BASE.tolist(),'R_BASE':R_BASE.tolist(),'Q_EVAL':Q_EVAL.tolist(),
@@ -197,8 +406,11 @@ class Agent:
         arrays={}
         for name in ['actor','critic']:
             net=getattr(self,name)
-            for i in range(4):
-                arrays[f'{name}{i}']=net.p[i]; arrays[f'{name}_m{i}']=net.m[i]; arrays[f'{name}_v{i}']=net.v[i]
+            arrays[f'{name}_param_count']=np.array(len(net.p))
+            for i in range(len(net.p)):
+                arrays[f'{name}{i}']=net.p[i]
+                arrays[f'{name}_m{i}']=net.m[i]
+                arrays[f'{name}_v{i}']=net.v[i]
             arrays[f'{name}_t']=np.array(net.t)
         np.savez(path, metadata=np.array(json.dumps(meta)), **arrays)
     def load(self,path,sigma_override=None):
@@ -213,14 +425,23 @@ class Agent:
             staged = {}
             for name in ['actor','critic']:
                 net=getattr(self,name)
-                params=[d[f'{name}{i}'].copy() for i in range(4)]
+                count_key=f'{name}_param_count'
+                if count_key not in d:
+                    raise ValueError('Checkpoint network architecture metadata missing: '+name)
+                param_count=int(d[count_key])
+                if param_count != len(net.p):
+                    raise ValueError(
+                        f'Checkpoint network parameter count mismatch for {name}: '
+                        f'{param_count} != {len(net.p)}'
+                    )
+                params=[d[f'{name}{i}'].copy() for i in range(param_count)]
                 if any(x.shape!=y.shape or not np.all(np.isfinite(x)) for x,y in zip(params,net.p)):
                     raise ValueError('Invalid checkpoint network: '+name)
-                keys=[f'{name}_t']+[f'{name}_{kind}{i}' for kind in ['m','v'] for i in range(4)]
+                keys=[f'{name}_t']+[f'{name}_{kind}{i}' for kind in ['m','v'] for i in range(param_count)]
                 if not all(key in d for key in keys):
                     raise ValueError('Missing Adam state: '+name)
-                m=[d[f'{name}_m{i}'].copy() for i in range(4)]
-                v=[d[f'{name}_v{i}'].copy() for i in range(4)]
+                m=[d[f'{name}_m{i}'].copy() for i in range(param_count)]
+                v=[d[f'{name}_v{i}'].copy() for i in range(param_count)]
                 t=d[f'{name}_t']
                 if (any(x.shape!=y.shape or not np.all(np.isfinite(x)) for x,y in zip(m+v,params+params))
                     or any(np.any(x<0) for x in v) or t.shape!=() or not np.isfinite(t)
@@ -390,7 +611,7 @@ def main():
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('evaluate requires --checkpoint')
     env=Environment(args.seconds); agent=Agent(args.seed,SIGMA if args.sigma is None else args.sigma,args.actor_lr,args.critic_lr,args.critic_nsteps)
     if args.checkpoint:agent.load(args.checkpoint,sigma_override=args.sigma)
-    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
+    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
     (args.output/'config.json').write_text(json.dumps(config,indent=2))
     if args.mode in ['train','smoke']:
         history=[];validation=[];update_history=[];total_updates=0;best_keys={};best_records={}

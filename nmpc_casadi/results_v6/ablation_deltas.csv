@@ -1,0 +1,5 @@
+scenario,comparison,left_controller,right_controller,return_delta,mean_cte_post_m_delta,max_cte_post_m_delta,rmse_heading_post_rad_delta,rmse_vx_post_mps_delta
+nominal,Actor effect with Qf fixed,actor_fixed_qf,fixed_qf,-144.0444614145697,0.004214730949177292,0.0036492902104430444,-0.0011846030976257367,0.0005451769050277624
+nominal,Actor effect with adaptive Qf,actor_critic,critic_only,16.04532786628988,-0.00031472448176598014,-0.004497758707452726,0.0005108322195357048,-0.0016564986547471933
+nominal,Adaptive Qf effect with initial Q/R,critic_only,fixed_qf,380.01325192834815,-0.01210406135713847,-0.007359038331993084,0.011913596153993969,-0.003732025797509711
+nominal,Adaptive Qf effect with learned Q/R,actor_critic,actor_fixed_qf,540.1030412092077,-0.016633516788081743,-0.015506087249888854,0.01360903147115541,-0.005933701357284667

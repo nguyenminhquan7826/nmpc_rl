@@ -29,9 +29,9 @@ from reference_manager import ReferenceManager
 # ============================================================
 # EDIT these diagonal entries to test one fixed controller before RL.
 # Q and Qf: vx, vy, psi, r, X, Y; R: Delta a, Delta delta.
-Q_TEST = np.array([12., 3., 50., 6., 70.75, 70.75])
-R_TEST = np.array([0.6, 70.])
-QF_TEST = np.array([12., 3., 50., 6., 70.75, 70.75])
+Q_TEST = np.array([12., 3., 50., 6., 100.75, 100.75])
+R_TEST = np.array([50, 100.])
+QF_TEST = 20.0 * Q_TEST
 
 Ts = 0.071              # [s] 14.08 Hz
 N = 10                   # fixed for the embedded-target study

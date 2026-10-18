@@ -27,7 +27,7 @@ from reference_manager import ReferenceManager
 # ============================================================
 # 1) Fixed experiment configuration
 # ============================================================
-Ts = 0.02               # [s] 50 Hz
+Ts = 0.071               # [s] 50 Hz
 N = 10                   # fixed for the embedded-target study
 TMAX = 120.0              # [s]
 DEADLINE_MS = Ts * 1000.0

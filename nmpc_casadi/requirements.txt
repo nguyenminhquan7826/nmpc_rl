@@ -1,4 +1,4 @@
-casadi
-numpy
-pandas
-matplotlib
+casadi==3.7.2
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
