@@ -1,6 +1,6 @@
 """NumPy Actor-Critic with n-step Critic and one-step Actor; no differentiation through NMPC.
 
-v9-5x32-reg: five 32-neuron tanh hidden layers with separate Actor/Qf regularization around nominal multipliers.
+R2-A (based on Reward R1): five 32-neuron tanh hidden layers, identical Actor/Qf regularization, and Critic n-step Huber TD loss (delta=50) instead of squared TD loss.
 The v6 value baseline is preserved: the critic value is
     V(s) = -b(s) - e' diag(F_BASE * m(s)) e ,   b(s) = B_SCALE * softplus(raw_6) >= 0
 so the value can represent cost that is not explained by terminal-weight energy
@@ -34,6 +34,11 @@ REWARD_SCHEME = "fixed_eval_progress_failure_v1"
 SOLVER_FAIL_STEP_COST = 10.0
 FAIL_TERMINAL_BASE = 1000.0
 FAIL_TERMINAL_REMAINING = 2000.0
+
+# R2-A: ONLY the n-step Critic loss/gradient changes relative to R1.
+# Reward, Actor TD, network architecture, optimizer, batch schedule, and regularizers are unchanged.
+CRITIC_TD_LOSS_KIND = 'huber'
+CRITIC_HUBER_DELTA = 50.0
 
 
 def failure_cost_at_progress(progress_fraction):
@@ -144,6 +149,24 @@ def n_step_targets(reward, next_values, terminated, steps, gamma=GAMMA):
             if terminated[j]:break
         if not terminated[j]:targets[k]+=discount*next_values[j]
     return targets,horizons
+
+
+def huber_td_loss_and_grad(td, delta=CRITIC_HUBER_DELTA):
+    """Per-sample Huber(TD) and d(Huber)/d(TD), before batch averaging.
+
+    TD is defined as n-step target minus V(s); d(loss)/d(V) = -gradient.
+    This clips the Critic loss slope, *not* the TD target, the task reward,
+    the Actor's one-step advantage, or Adam's global gradient clipping.
+    """
+    if not np.isfinite(delta) or delta <= 0.0:
+        raise ValueError('Huber delta must be positive and finite')
+    td = np.asarray(td, dtype=float)
+    a = np.abs(td)
+    quad = np.minimum(a, delta)
+    # Continuous at |td| = delta; quadratic for small TD and linear outside.
+    losses = 0.5 * quad * quad + delta * (a - quad)
+    slope = np.clip(td, -delta, delta)
+    return losses, slope
 
 
 class MLP:
@@ -322,8 +345,10 @@ class Agent:
         dv[:,:6]=-e*e*F_BASE*dm_draw
         dv[:,6]=-B_SCALE*sigmoid(raw[:,6])
 
-        # TD/MSE gradient: d[0.5*(target-V)^2]/d(raw)
-        critic_raw_grad=(-td[:,None]*dv)/batch_n
+        # R2-A: derivative of mean Huber(target - V) wrt raw critic output.
+        # No change to frozen n-step targets, Actor one-step TD, or Qf regularizer.
+        huber_per_sample, huber_slope = huber_td_loss_and_grad(td)
+        critic_raw_grad=(-huber_slope[:,None]*dv)/batch_n
 
         # Qf regularizer:
         #   L_qf_reg = mean(sum_i lambda_i * log(m_i)^2)
@@ -390,7 +415,9 @@ class Agent:
             axis=1
         )
         actor_pg_loss=float(np.mean(-advantage*logp))
+        # IMPORTANT: preserve raw TD MSE under its old name for fair R1/T1 plots.
         critic_td_loss=float(np.mean(td*td)/2)
+        critic_huber_loss=float(np.mean(huber_per_sample))
 
         return {
                 'critic_target_horizon_mean':float(horizons.mean()),
@@ -403,14 +430,19 @@ class Agent:
                 'td_mean':float(td.mean()),
                 'td_rms':float(np.sqrt(np.mean(td*td))),
 
-                # Preserve old loss names for comparison with previous runs.
-                'critic_loss':critic_td_loss,
+                # critic_loss is the optimized Critic TD objective, now Huber.
+                # critic_td_loss below retains its historical MSE definition.
+                'critic_loss':critic_huber_loss,
                 'actor_loss':actor_pg_loss,
 
                 # New separated loss diagnostics.
                 'critic_td_loss':critic_td_loss,
+                'critic_td_mse_loss':critic_td_loss,
+                'critic_td_huber_loss':critic_huber_loss,
+                'critic_td_abs_max':float(np.max(np.abs(td))),
+                'critic_huber_linear_pct':float(100*np.mean(np.abs(td)>CRITIC_HUBER_DELTA)),
                 'critic_qf_reg_loss':qf_reg_loss,
-                'critic_loss_total':critic_td_loss+qf_reg_loss,
+                'critic_loss_total':critic_huber_loss+qf_reg_loss,
                 'actor_pg_loss':actor_pg_loss,
                 'actor_reg_loss':actor_reg_loss,
                 'actor_loss_total':actor_pg_loss+actor_reg_loss,
@@ -440,7 +472,7 @@ class Agent:
         }
 
     def _meta(self):
-        return {'version':10,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
+        return {'version':11,'reward_scheme':REWARD_SCHEME,'critic_td_loss_kind':CRITIC_TD_LOSS_KIND,'critic_huber_delta':CRITIC_HUBER_DELTA,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'td_target':'n_step','critic_nsteps':self.critic_nsteps,'actor_advantage':'one_step_td','critic_baseline':[B_SCALE,B_INIT_RAW],
                 'network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,
                 'network_initializer':NN_INITIALIZER,
                 'actor_regularizer':'log_multiplier_squared',
@@ -687,7 +719,7 @@ def main():
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('evaluate requires --checkpoint')
     env=Environment(args.seconds); agent=Agent(args.seed,SIGMA if args.sigma is None else args.sigma,args.actor_lr,args.critic_lr,args.critic_nsteps)
     if args.checkpoint:agent.load(args.checkpoint,sigma_override=args.sigma)
-    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
+    config={'td_target':'n_step','critic_td_loss_kind':CRITIC_TD_LOSS_KIND,'critic_huber_delta':CRITIC_HUBER_DELTA,'critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
     (args.output/'config.json').write_text(json.dumps(config,indent=2))
     if args.mode in ['train','smoke']:
         history=[];validation=[];update_history=[];total_updates=0;best_keys={};best_records={}
