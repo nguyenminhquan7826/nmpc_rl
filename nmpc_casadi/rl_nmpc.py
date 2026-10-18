@@ -522,7 +522,7 @@ class Environment:
         self.rm=b.make_reference_manager()
         self.x,self.prev,self.guess,_=b.build_initial_state_and_guess(self.rm,self.problem,ey,epsi)
         self.plant=b.p_nominal.copy() if plant is None else plant.copy()
-        self.k=0; self.fail=0; self.logs=[]
+        self.k=0; self.fail=0; self.logs=[]; self.solver_diagnostics=[]
         return self.observe()
     def step(self,weights):
         old=self.x.copy(); obs,e=self.observe(); ref=self.ref
@@ -530,6 +530,7 @@ class Environment:
         p=pack_parameters(self.x,self.prev,ref['xref'],b.p_nominal,weights)
         start=time.perf_counter(); success=False; primary=False; violation=np.inf
         solver_attempt_details=[]
+        failed_attempts=[]  # diagnostics only
         for attempt in range(2):
             violation=np.inf
             guess=self.guess if attempt==0 else b.build_fresh_dynamics_rollout_guess(self.rm,self.x,self.prev,ref)
@@ -540,14 +541,43 @@ class Environment:
                 stats=self.problem['solver'].stats()
                 success=bool(stats.get('success',False)) and np.all(np.isfinite(z)) and np.isfinite(violation) and violation<=1e-6
                 solver_attempt_details.append(f"try{attempt+1}:{stats.get('return_status','unknown')}:violation={violation:.3e}")
+                if not success:
+                    failed_attempts.append({
+                        'attempt':attempt+1, 'kind':'rejected_solver_result',
+                        'return_status':str(stats.get('return_status','unknown')),
+                        'stats_success':bool(stats.get('success',False)),
+                        'iter_count':int(stats['iter_count']) if stats.get('iter_count') is not None else None,
+                        'constraint_violation':float(violation) if np.isfinite(violation) else None,
+                        'finite_solution':bool(np.all(np.isfinite(z))),
+                        'finite_constraints':bool(np.all(np.isfinite(g))),
+                    })
                 if success:
                     primary=attempt==0; xs,us=unpack_solution(z,b.N); u=us[:,0].copy(); self.guess=shift_warm_start(xs,us); break
             except Exception as exc:
                 success=False
                 solver_attempt_details.append(f"try{attempt+1}:{type(exc).__name__}:{str(exc)[:300]}")
+                failed_attempts.append({
+                    'attempt':attempt+1, 'kind':'solver_exception',
+                    'exception_type':type(exc).__name__,
+                    'exception_full':str(exc),  # untruncated SQP/QRQP error
+                })
         elapsed=(time.perf_counter()-start)*1000
         if not success:u=self.prev.copy()
         self.fail=0 if success else self.fail+1
+        if failed_attempts:
+            self.solver_diagnostics.append({
+                'step_index':int(self.k),'t_s':float(self.k*b.Ts),
+                'final_solver_success':bool(success),
+                'consecutive_failed_steps':int(self.fail),
+                'state_pre':old.tolist(),
+                'u_prev':self.prev.tolist(),
+                'reference_state':np.asarray(ref['xref'][0],dtype=float).tolist(),
+                'progress_before_m':float(progress_before),
+                'q_diag':np.asarray(weights[0],dtype=float).tolist(),
+                'r_diag':np.asarray(weights[1],dtype=float).tolist(),
+                'qf_diag':np.asarray(weights[2],dtype=float).tolist(),
+                'attempt_failures':failed_attempts,
+            })
         du=u-self.prev
         # Reward uses the SAME fixed evaluation weights as the prior training.
         # Determine termination after plant propagation and before charging penalty.
@@ -572,6 +602,7 @@ class Environment:
              'primary_success':int(primary),'constraint_violation':violation,
              'solve_ms':elapsed,'solver_attempt_count':len(solver_attempt_details),
              'solver_attempt_details':' | '.join(solver_attempt_details),
+             'solver_diagnostic_event':int(bool(failed_attempts)),
              'a':u[0],'delta':u[1],'du_a':du[0],'du_delta':du[1],
              'progress_before_m':progress_before,'progress_m':progress_after,
              'progress_fraction':progress_fraction,
@@ -585,6 +616,17 @@ class Environment:
             row.update({f'{name}_{i}':float(v) for i,v in enumerate(w)})
         self.logs.append(row)
         return sn,en,costs['reward'],done,terminated
+
+def export_solver_diagnostics(path, records):
+    """Write complete failed solver attempts to JSONL; no effect on control."""
+    path = Path(path)
+    if not records:
+        if path.exists(): path.unlink()
+        return
+    with path.open('w', encoding='utf-8') as f:
+        for record in records:
+            f.write(json.dumps(record,ensure_ascii=False,allow_nan=False)+'\n')
+
 
 def metrics(log):
     d=pd.DataFrame(log)
@@ -687,7 +729,7 @@ def main():
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('evaluate requires --checkpoint')
     env=Environment(args.seconds); agent=Agent(args.seed,SIGMA if args.sigma is None else args.sigma,args.actor_lr,args.critic_lr,args.critic_nsteps)
     if args.checkpoint:agent.load(args.checkpoint,sigma_override=args.sigma)
-    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'reward_scheme':REWARD_SCHEME,'solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
+    config={'td_target':'n_step','critic_nsteps':agent.critic_nsteps,'actor_advantage':'one_step_td','target_gradient':'stopped','critic_value':'-b(s)-e^T Qf(s) e, b>=0','network_hidden_sizes':list(HIDDEN_SIZES),'network_activation':NN_ACTIVATION,'network_initializer':NN_INITIALIZER,'actor_regularizer':'log_multiplier_squared','qf_regularizer':'log_multiplier_squared','ACTOR_REG':ACTOR_REG.tolist(),'QF_REG':QF_REG.tolist(),'actor_parameter_count':sum(x.size for x in agent.actor.p),'critic_parameter_count':sum(x.size for x in agent.critic.p),'b_scale':B_SCALE,'b_init_raw':B_INIT_RAW,'fixed_terminal_multiplier':FHI,'actor_lr':args.actor_lr,'critic_lr':args.critic_lr,'rollout_steps':args.rollout_steps,'eval_every':args.eval_every,'Ts':b.Ts,'N':b.N,'seed':args.seed,'seconds':args.seconds,'gamma':GAMMA,'sigma_fixed':agent.sigma,'actor_lower':LO.tolist(),'actor_upper':HI.tolist(),'critic_bounds':[FLO,FHI],'Q_INIT':env.initial_weights[0].tolist(),'R_INIT':env.initial_weights[1].tolist(),'QF_INIT':env.initial_weights[2].tolist(),'Q_EVAL':Q_EVAL.tolist(),'R_EVAL':R_EVAL.tolist(),'reward_weights_fixed':True,'reward_scheme':REWARD_SCHEME,'solver_diagnostics_format':'full_exception_attempts_jsonl_v1','solver_fail_step_cost':SOLVER_FAIL_STEP_COST,'fail_terminal_base':FAIL_TERMINAL_BASE,'fail_terminal_remaining':FAIL_TERMINAL_REMAINING,'checkpoint_source':str(args.checkpoint) if args.checkpoint else None,'evaluation_controllers':CONTROLLERS,'selection_priority':'feasible, completed with solver >=99%, then tracking or return on nominal validation'}
     (args.output/'config.json').write_text(json.dumps(config,indent=2))
     if args.mode in ['train','smoke']:
         history=[];validation=[];update_history=[];total_updates=0;best_keys={};best_records={}
@@ -703,6 +745,7 @@ def main():
             loss={"total_updates":total_updates}; history.append({'episode':ep,'initial_ey':ey,'initial_epsi':heading,**m,**loss})
             if not all(np.all(np.isfinite(p)) for net in [agent.actor,agent.critic] for p in net.p):raise RuntimeError('Nonfinite network parameters')
             pd.DataFrame(env.logs).to_csv(args.output/f'episode_{ep:04d}.csv',index=False)
+            export_solver_diagnostics(args.output/f'episode_{ep:04d}_solver_failures.jsonl',env.solver_diagnostics)
             pd.DataFrame(history).to_csv(args.output/'training_history.csv',index=False)
             agent.save(args.output/'checkpoint.npz')
             print(json.dumps(history[-1]),flush=True)
@@ -710,6 +753,7 @@ def main():
                 for label in CONTROLLERS:
                     _,vm=rollout(env,agent,False,.05,0,controller=label)
                     validation.append({'episode':ep,'total_updates':total_updates,'controller':label,**vm})
+                    export_solver_diagnostics(args.output/f'validation_ep{ep:04d}_{label}_solver_failures.jsonl',env.solver_diagnostics)
                     if label=='actor_critic':
                         for criterion in ['tracking','return']:
                             key=selection_key(vm,criterion)
@@ -739,6 +783,7 @@ def main():
                 diagnostic=export_diagnostics(env.logs,args.output,name,GAMMA)
                 m.update(diagnostic)
             pd.DataFrame(env.logs).to_csv(args.output/f'{name}_{label}.csv',index=False)
+            export_solver_diagnostics(args.output/f'{name}_{label}_solver_failures.jsonl',env.solver_diagnostics)
             results.append({'scenario':name,'controller':label,**m})
     pd.DataFrame(results).to_csv(args.output/'comparison.csv',index=False)
     comparison=pd.DataFrame(results)
