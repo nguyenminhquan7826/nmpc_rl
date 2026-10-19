@@ -57,6 +57,25 @@ class FrozenTests(unittest.TestCase):
                     np.testing.assert_array_equal(x, y)
             self.assertTrue((log['learn_ms'] == 0).all())
 
+    def test_deterministic_frozen_uses_same_mean_each_step(self):
+        agent = rl.Agent(seed=91)
+        expected = rl.Agent(seed=91).propose(np.zeros(12), False)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                output=Path(directory), payload_start=30., payload_ramp_s=10.,
+                road_start=30., road_end=60., road_transition_s=5.,
+                payload_fraction=.1, cornering_drop=.2, rolling_increase=.25)
+            sc = dict(name='nominal', ey=.05, heading=0., profile='nominal')
+            env = DummyEnv()
+            with patch.object(adapt.rl, 'metrics', return_value={}):
+                result = adapt.run_ac_nmpc_frozen(
+                    env, agent, args, sc, deterministic=True)
+            self.assertEqual(result['sampling_mode'], 'deterministic_mean')
+            self.assertEqual(result['updates'], 0)
+            for used in env.applied:
+                for x, y in zip(used, expected):
+                    np.testing.assert_array_equal(x, y)
+
     def test_parameter_change_detected(self):
         agent = rl.Agent(seed=0)
         before = adapt.snapshot_network_state(agent)
