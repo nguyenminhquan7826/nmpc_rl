@@ -12,7 +12,6 @@ import rl_nmpc as rl
 from cad_eval_reference import prepare_cad_evaluation_reference
 from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
 from qfpsi_isolation import install_pretrained_qfpsi_function, verify_frozen_qfpsi
-from qfpsi_trust_region import QfPsiTrustProjector
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -27,10 +26,6 @@ QFPSI_HOLD_MODES = {
     'ac_nmpc_critic_qfpsi_held': 'critic',
     'ac_nmpc_online_qfpsi_held': 'both',
 }
-QFPSI_TRUST_MODES = {
-    'ac_nmpc_critic_qfpsi_trust': 'critic',
-    'ac_nmpc_online_qfpsi_trust': 'both',
-}
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
@@ -40,18 +35,14 @@ DISPLAY = {
     'ac_nmpc_critic_only': 'Online Critic-only',
     'ac_nmpc_critic_qfpsi_held': 'Critic-only, Qf_psi held',
     'ac_nmpc_online_qfpsi_held': 'Online both, Qf_psi held',
-    'ac_nmpc_critic_qfpsi_trust': 'Critic-only, Qf_psi trust',
-    'ac_nmpc_online_qfpsi_trust': 'Online both, Qf_psi trust',
 }
 
 
 def active_controllers(include_frozen_deterministic=False, include_ablation=False,
-                       isolate_qfpsi=False, qfpsi_trust_frac=None):
-    """Default roster unchanged; optional Qf_psi(s) control interventions."""
+                       isolate_qfpsi=False):
+    """Default roster unchanged; optional Qf_psi(s) causal intervention."""
     if isolate_qfpsi and not include_ablation:
         raise ValueError('Qf_psi isolation requires --ablation-components')
-    if qfpsi_trust_frac is not None and not include_ablation:
-        raise ValueError('Qf_psi trust evaluation requires --ablation-components')
     if not include_ablation:
         if include_frozen_deterministic:
             return ('fixed_nmpc', 'ac_nmpc_frozen',
@@ -63,13 +54,9 @@ def active_controllers(include_frozen_deterministic=False, include_ablation=Fals
     order.extend(ABLATION_MODES)
     if isolate_qfpsi:
         order.append('ac_nmpc_critic_qfpsi_held')
-    if qfpsi_trust_frac is not None:
-        order.append('ac_nmpc_critic_qfpsi_trust')
     order.append('ac_nmpc_online')
     if isolate_qfpsi:
         order.append('ac_nmpc_online_qfpsi_held')
-    if qfpsi_trust_frac is not None:
-        order.append('ac_nmpc_online_qfpsi_trust')
     return tuple(order)
 
 
@@ -187,12 +174,6 @@ def fresh_agent(args, meta):
         )
     agent = rl.Agent(**kw)
     agent.load(args.checkpoint)
-    # Agent.load restores the checkpoint's RNG state, overriding --seed.
-    # New opt-in evaluation seed varies Gaussian exploration without changing
-    # pretrained weights/Adam moments. Every control arm gets the SAME seed.
-    sampling_seed = getattr(args, 'sampling_seed', None)
-    if sampling_seed is not None:
-        agent.rng = np.random.default_rng(sampling_seed)
     if getattr(agent, 'train_component', 'both') != 'both':
         raise ValueError(
             'This comparison requires an Actor-Critic checkpoint with train_component="both". '
@@ -454,12 +435,10 @@ def run_fixed_nmpc(env, args, scenario):
 
 def run_ac_nmpc_online(env, agent, args, scenario, *,
                        train_component='both', controller_label='ac_nmpc_online',
-                       hold_qfpsi=False, trust_qfpsi_frac=None):
-    """Sampled AC-NMPC with selective learning and Qf_psi interventions."""
+                       hold_qfpsi=False):
+    """Sampled AC-NMPC with selective learning and optional functional Qf_psi hold."""
     if train_component not in ('both', 'actor', 'critic'):
         raise ValueError('Unknown online ablation mode')
-    if hold_qfpsi and trust_qfpsi_frac is not None:
-        raise ValueError('Cannot combine gradient-hold and solver-only trust')
     if hold_qfpsi:
         expected = next(
             (key for key, value in QFPSI_HOLD_MODES.items()
@@ -467,13 +446,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         )
         if expected is None:
             raise ValueError('Qf_psi hold only supported with Critic learning')
-    elif trust_qfpsi_frac is not None:
-        expected = next(
-            (key for key, value in QFPSI_TRUST_MODES.items()
-             if value == train_component), None,
-        )
-        if expected is None:
-            raise ValueError('Qf_psi trust only supported with Critic learning')
     else:
         expected = ('ac_nmpc_online' if train_component == 'both'
                     else next(k for k, v in ABLATION_MODES.items()
@@ -498,10 +470,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     frozen_qfpsi = None
     if hold_qfpsi:
         original_terms, frozen_qfpsi = install_pretrained_qfpsi_function(agent)
-    # Solver-only projection: Critic/value/TD/Huber/Adam remain UNTOUCHED.
-    projector = (QfPsiTrustProjector(agent.critic, trust_qfpsi_frac)
-                 if trust_qfpsi_frac is not None else None)
-    projection_records = []
 
     learn_call_times = []
     propose_timing = []
@@ -521,10 +489,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         result = original_propose(*a, **kw)
         if hold_qfpsi:
             verify_frozen_qfpsi(result[0], float(frozen_qfpsi(a[0])))
-        if projector is not None:
-            applied_weights, audit = projector.project(result[0], a[0])
-            projection_records.append(audit)
-            result = (applied_weights, result[1])  # preserve Actor's sampled z
         propose_timing.append((time.perf_counter_ns() - start) / 1e6)
         return result
 
@@ -575,22 +539,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         )
 
     logs['env_step_wall_ms'] = np.asarray(step_timing, dtype=float)
-    if projector is not None:
-        if len(projection_records) != n:
-            raise RuntimeError('Qf_psi projection audit/sample log alignment failed')
-        audit_frame = pd.DataFrame(projection_records)
-        for col in audit_frame.columns:
-            logs[col] = audit_frame[col].to_numpy()
-        audit_frame.to_csv(
-            args.output / f'{name}_{controller_label}_trust_audit.csv',
-            index=False,
-        )
-        if not np.allclose(
-            logs['qf_2'].to_numpy(float),
-            logs['qfpsi_applied'].to_numpy(float),
-            rtol=1e-10, atol=1e-9,
-        ):
-            raise RuntimeError('Applied Qf_psi log disagrees with trust projector')
     logs['updates_before_action'] = 0
     learn_by_step = np.zeros(n, dtype=float)
     updates = getattr(env, 'learning_updates', [])
@@ -605,16 +553,17 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     logs.to_csv(args.output / f'{name}_{controller_label}.csv', index=False)
 
     # Preserve legacy output filenames for the original Online condition.
-    if train_component == 'both' and projector is None:
+    if train_component == 'both':
         update_name = f'{name}_ac_updates.csv'
         checkpoint_name = f'{name}_ac_adapted_checkpoint.npz'
     else:
         update_name = f'{name}_{controller_label}_updates.csv'
         checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
     pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
-    # Held/trust arms depend on an immutable pretrained reference Critic.
-    # A single Agent checkpoint alone cannot replay these composed policies.
-    if not hold_qfpsi and projector is None:
+    # Critical: the held-head arm is a two-network inference composition.
+    # Saving a plain Agent checkpoint would NOT preserve that held function,
+    # so do not issue a misleading standalone adapted checkpoint.
+    if not hold_qfpsi:
         agent.save(args.output / checkpoint_name)
     unchanged_actor = net_unchanged(agent.actor, initial_actor)
     unchanged_critic = net_unchanged(agent.critic, initial_critic)
@@ -629,15 +578,7 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         controller=controller_label,
         train_component=train_component,
         qfpsi_function_held_at_checkpoint=bool(hold_qfpsi),
-        qfpsi_solver_only_trust=projector is not None,
-        qfpsi_trust_frac=(None if projector is None else projector.trust_pct),
-        qfpsi_trust_projected_pct=(
-            None if projector is None else float(
-                100.0 * np.mean([a['qfpsi_projected']
-                                 for a in projection_records])
-            )
-        ),
-        adapted_checkpoint_saved=not hold_qfpsi and projector is None,
+        adapted_checkpoint_saved=not bool(hold_qfpsi),
         actor_unchanged_from_checkpoint=unchanged_actor,
         critic_unchanged_from_checkpoint=unchanged_critic,
         actor_parameter_change_norm=net_parameter_change_norm(
@@ -847,12 +788,6 @@ def build_pairwise_long(comparison):
          'ac_nmpc_frozen'),
         ('qfpsi_hold_both_vs_frozen', 'ac_nmpc_online_qfpsi_held',
          'ac_nmpc_frozen'),
-        ('qfpsi_trust_critic_vs_critic', 'ac_nmpc_critic_qfpsi_trust',
-         'ac_nmpc_critic_only'),
-        ('qfpsi_trust_both_vs_both', 'ac_nmpc_online_qfpsi_trust',
-         'ac_nmpc_online'),
-        ('qfpsi_trust_both_vs_frozen', 'ac_nmpc_online_qfpsi_trust',
-         'ac_nmpc_frozen'),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -930,11 +865,7 @@ def main():
     ap.add_argument('--actor-lr', type=float, default=.003)
     ap.add_argument('--critic-lr', type=float, default=.001)
     ap.add_argument('--seconds', type=float, default=120)
-    ap.add_argument('--seed', type=int, default=0,
-                    help='Legacy Agent constructor seed; checkpoint load restores RNG')
-    ap.add_argument('--sampling-seed', type=int, default=None,
-                    help='Optional independent Gaussian exploration seed AFTER checkpoint load; '
-                         'omit to reproduce legacy experiments exactly')
+    ap.add_argument('--seed', type=int, default=0)
     track_selection = ap.add_mutually_exclusive_group()
     track_selection.add_argument(
         '--track', choices=['heldout_s_bend', 'training'],
@@ -953,10 +884,6 @@ def main():
     ap.add_argument('--isolate-qfpsi', action='store_true',
                     help='Also compare Critic-only and both Online with pretrained '
                          'Qf_psi(s) held fixed while other Critic outputs adapt')
-    ap.add_argument('--qfpsi-trust-frac', type=float, default=None,
-                    help='Evaluation only: keep applied solver Qf_psi(s) within '
-                         '(1 +/- frac) of pretrained Critic output; Critic TD '
-                         'learning is unchanged. Example 0.10 = +/-10%%.')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -978,17 +905,8 @@ def main():
 
     if args.rollout_steps < 1 or args.seconds <= 0 or not np.isfinite(args.seconds):
         ap.error('rollout-steps and seconds must be positive')
-    if args.sampling_seed is not None and args.sampling_seed < 0:
-        ap.error('--sampling-seed must be a non-negative integer')
     if args.isolate_qfpsi and not args.ablation_components:
         ap.error('--isolate-qfpsi requires --ablation-components')
-    if args.qfpsi_trust_frac is not None:
-        if not args.ablation_components:
-            ap.error('--qfpsi-trust-frac requires --ablation-components')
-        if not np.isfinite(args.qfpsi_trust_frac) or not (
-            0 <= args.qfpsi_trust_frac <= 1.0
-        ):
-            ap.error('--qfpsi-trust-frac must be finite in [0, 1]')
     for lr in [args.actor_lr, args.critic_lr]:
         if not np.isfinite(lr) or lr <= 0:
             ap.error('learning rates must be positive and finite')
@@ -1021,7 +939,6 @@ def main():
         args.include_frozen_deterministic,
         include_ablation=args.ablation_components,
         isolate_qfpsi=args.isolate_qfpsi,
-        qfpsi_trust_frac=args.qfpsi_trust_frac,
     )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
@@ -1069,16 +986,6 @@ def main():
                 'Critic function. Other Critic outputs and Actor continue updating; '
                 'no standalone adapted checkpoint is produced.'
             ),
-            'ac_nmpc_critic_qfpsi_trust': (
-                'Critic updates under unchanged TD-Huber; ONLY applied solver '
-                'Qf_psi is projected around pretrained Qf_psi(s). No proof of '
-                'closed-loop stability; full Critic/value remains unprojected.'
-            ),
-            'ac_nmpc_online_qfpsi_trust': (
-                'Both networks update under unchanged losses; ONLY applied '
-                'solver Qf_psi is projected around pretrained Qf_psi(s). '
-                'No standalone adapted checkpoint or stability certificate.'
-            ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -1087,7 +994,6 @@ def main():
             'same_nmpc_internal_model': 'b.p_nominal',
             'checkpoint_reset_for_each_ac_scenario_and_controller': True,
             'frozen_online_same_sampled_rng_initial_state': True,
-            'same_sampling_seed_for_every_actor_critic_arm': True,
             'frozen_online_same_explore_true': True,
             'frozen_has_zero_learning_updates': True,
             'online_rollout_steps': args.rollout_steps,
@@ -1097,20 +1003,11 @@ def main():
         },
         ablation_components=bool(args.ablation_components),
         isolate_qfpsi=bool(args.isolate_qfpsi),
-        qfpsi_trust_frac=args.qfpsi_trust_frac,
-        qfpsi_trust_method='solver_input_only_pretrained_state_dependent',
-        qfpsi_trust_is_stability_certificate=False,
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         seconds=args.seconds,
         seed=args.seed,
-        sampling_seed=args.sampling_seed,
-        gaussian_sampling_rng_policy=(
-            'explicit_independent_seed_after_checkpoint_load'
-            if args.sampling_seed is not None
-            else 'checkpoint_restored_rng_state'
-        ),
         Ts_s=float(rl.b.Ts),
         control_deadline_ms=float(rl.b.Ts * 1000.0),
         scenario_set=args.scenario_set,
@@ -1182,13 +1079,6 @@ def main():
                     controller_label=controller,
                     hold_qfpsi=True,
                 )
-            elif controller in QFPSI_TRUST_MODES:
-                m = run_ac_nmpc_online(
-                    env, fresh_agent(args, meta), args, scenario,
-                    train_component=QFPSI_TRUST_MODES[controller],
-                    controller_label=controller,
-                    trust_qfpsi_frac=args.qfpsi_trust_frac,
-                )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
             m['reference_track'] = reference_metadata['id']
@@ -1213,8 +1103,6 @@ def main():
                    'ac_nmpc_critic_only', 'ac_nmpc_online']
         if args.isolate_qfpsi:
             targets.extend(QFPSI_HOLD_MODES)
-        if args.qfpsi_trust_frac is not None:
-            targets.extend(QFPSI_TRUST_MODES)
         for scenario in scenarios:
             name = scenario['name']
             frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
