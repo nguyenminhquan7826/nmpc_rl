@@ -689,14 +689,19 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     else:
         if not split_policy.inactive_weights_unchanged():
             raise RuntimeError('Qfpg modified frozen terminal features or non-psi outputs')
-        if not split_policy.initial_function_unchanged_for_other_five(
-            np.asarray([x[0] for x in split_policy.sample_audit])[:0].reshape(0, 12)
-        ):
-            raise RuntimeError('Frozen Qf components changed')
+        checked_states = np.asarray([
+            split_policy.sample_states[j]
+            for j in sorted(set((0, n // 2, n - 1)))
+        ])
+        if not split_policy.initial_function_unchanged_for_other_five(checked_states):
+            raise RuntimeError('Frozen Qf components changed at rollout observations')
         if split_policy.terminal_learning and split_policy.qf_training_updates != len(updates):
             raise RuntimeError('Qfpg updates do not align with rollout updates')
         if not split_policy.terminal_learning and not split_policy.terminal_unchanged():
             raise RuntimeError('Terminal sampled-frozen control unexpectedly updated')
+        if (split_policy.terminal_learning and
+                split_policy.terminal_unchanged()):
+            raise RuntimeError('Terminal Qf learner made no parameter update')
     unchanged_actor = net_unchanged(agent.actor, initial_actor)
     unchanged_critic = net_unchanged(agent.critic, initial_critic)
     if train_component == 'actor' and not unchanged_critic:
