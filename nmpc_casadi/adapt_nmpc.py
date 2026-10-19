@@ -11,6 +11,7 @@ import pandas as pd
 import rl_nmpc as rl
 from cad_eval_reference import prepare_cad_evaluation_reference
 from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
+from qfpsi_isolation import install_pretrained_qfpsi_function, verify_frozen_qfpsi
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -21,6 +22,10 @@ from heldout_reference import (
 CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online')
 FROZEN_DETERMINISTIC = 'ac_nmpc_frozen_deterministic'
 ABLATION_MODES = {'ac_nmpc_actor_only': 'actor', 'ac_nmpc_critic_only': 'critic'}
+QFPSI_HOLD_MODES = {
+    'ac_nmpc_critic_qfpsi_held': 'critic',
+    'ac_nmpc_online_qfpsi_held': 'both',
+}
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
@@ -28,11 +33,16 @@ DISPLAY = {
     'ac_nmpc_online': 'Online AC-NMPC',
     'ac_nmpc_actor_only': 'Online Actor-only',
     'ac_nmpc_critic_only': 'Online Critic-only',
+    'ac_nmpc_critic_qfpsi_held': 'Critic-only, Qf_psi held',
+    'ac_nmpc_online_qfpsi_held': 'Online both, Qf_psi held',
 }
 
 
-def active_controllers(include_frozen_deterministic=False, include_ablation=False):
-    """Default controller roster is unchanged unless ablation is explicit."""
+def active_controllers(include_frozen_deterministic=False, include_ablation=False,
+                       isolate_qfpsi=False):
+    """Default roster unchanged; optional Qf_psi(s) causal intervention."""
+    if isolate_qfpsi and not include_ablation:
+        raise ValueError('Qf_psi isolation requires --ablation-components')
     if not include_ablation:
         if include_frozen_deterministic:
             return ('fixed_nmpc', 'ac_nmpc_frozen',
@@ -42,7 +52,11 @@ def active_controllers(include_frozen_deterministic=False, include_ablation=Fals
     if include_frozen_deterministic:
         order.append(FROZEN_DETERMINISTIC)
     order.extend(ABLATION_MODES)
+    if isolate_qfpsi:
+        order.append('ac_nmpc_critic_qfpsi_held')
     order.append('ac_nmpc_online')
+    if isolate_qfpsi:
+        order.append('ac_nmpc_online_qfpsi_held')
     return tuple(order)
 
 
@@ -420,12 +434,22 @@ def run_fixed_nmpc(env, args, scenario):
 
 
 def run_ac_nmpc_online(env, agent, args, scenario, *,
-                       train_component='both', controller_label='ac_nmpc_online'):
-    """Sampled AC-NMPC with both or only one network updated."""
+                       train_component='both', controller_label='ac_nmpc_online',
+                       hold_qfpsi=False):
+    """Sampled AC-NMPC with selective learning and optional functional Qf_psi hold."""
     if train_component not in ('both', 'actor', 'critic'):
         raise ValueError('Unknown online ablation mode')
-    expected = ('ac_nmpc_online' if train_component == 'both'
-                else next(k for k, v in ABLATION_MODES.items() if v == train_component))
+    if hold_qfpsi:
+        expected = next(
+            (key for key, value in QFPSI_HOLD_MODES.items()
+             if value == train_component), None,
+        )
+        if expected is None:
+            raise ValueError('Qf_psi hold only supported with Critic learning')
+    else:
+        expected = ('ac_nmpc_online' if train_component == 'both'
+                    else next(k for k, v in ABLATION_MODES.items()
+                              if v == train_component))
     if controller_label != expected:
         raise ValueError('Controller label/mode mismatch')
     initial_actor = snapshot_net(agent.actor)
@@ -438,6 +462,14 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     original_learn = agent.learn
     original_propose = agent.propose
     original_step = env.step
+
+    # Qf_psi(s) is masked at the FUNCTION level using an immutable pretrained
+    # critic. Freezing only its output-layer column would not suffice when
+    # shared hidden layers continue to change.
+    original_terms = None
+    frozen_qfpsi = None
+    if hold_qfpsi:
+        original_terms, frozen_qfpsi = install_pretrained_qfpsi_function(agent)
 
     learn_call_times = []
     propose_timing = []
@@ -455,6 +487,8 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     def timed_propose(*a, **kw):
         start = time.perf_counter_ns()
         result = original_propose(*a, **kw)
+        if hold_qfpsi:
+            verify_frozen_qfpsi(result[0], float(frozen_qfpsi(a[0])))
         propose_timing.append((time.perf_counter_ns() - start) / 1e6)
         return result
 
@@ -492,6 +526,8 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         agent.learn = original_learn
         agent.propose = original_propose
         env.step = original_step
+        if hold_qfpsi:
+            agent.critic_terms = original_terms
     wall_ms = (time.perf_counter_ns() - wall_start) / 1e6
 
     logs = pd.DataFrame(env.logs)
@@ -524,7 +560,11 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         update_name = f'{name}_{controller_label}_updates.csv'
         checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
     pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
-    agent.save(args.output / checkpoint_name)
+    # Critical: the held-head arm is a two-network inference composition.
+    # Saving a plain Agent checkpoint would NOT preserve that held function,
+    # so do not issue a misleading standalone adapted checkpoint.
+    if not hold_qfpsi:
+        agent.save(args.output / checkpoint_name)
     unchanged_actor = net_unchanged(agent.actor, initial_actor)
     unchanged_critic = net_unchanged(agent.critic, initial_critic)
     if train_component == 'actor' and not unchanged_critic:
@@ -537,6 +577,8 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         plant_profile=profile,
         controller=controller_label,
         train_component=train_component,
+        qfpsi_function_held_at_checkpoint=bool(hold_qfpsi),
+        adapted_checkpoint_saved=not bool(hold_qfpsi),
         actor_unchanged_from_checkpoint=unchanged_actor,
         critic_unchanged_from_checkpoint=unchanged_critic,
         actor_parameter_change_norm=net_parameter_change_norm(
@@ -738,6 +780,14 @@ def build_pairwise_long(comparison):
         ('critic_only_vs_frozen', 'ac_nmpc_critic_only', 'ac_nmpc_frozen'),
         ('both_vs_actor_only', 'ac_nmpc_online', 'ac_nmpc_actor_only'),
         ('both_vs_critic_only', 'ac_nmpc_online', 'ac_nmpc_critic_only'),
+        ('qfpsi_hold_critic_vs_critic', 'ac_nmpc_critic_qfpsi_held',
+         'ac_nmpc_critic_only'),
+        ('qfpsi_hold_both_vs_both', 'ac_nmpc_online_qfpsi_held',
+         'ac_nmpc_online'),
+        ('qfpsi_hold_critic_vs_frozen', 'ac_nmpc_critic_qfpsi_held',
+         'ac_nmpc_frozen'),
+        ('qfpsi_hold_both_vs_frozen', 'ac_nmpc_online_qfpsi_held',
+         'ac_nmpc_frozen'),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -831,6 +881,9 @@ def main():
                     help='Also evaluate frozen Actor mean without Gaussian exploration')
     ap.add_argument('--ablation-components', action='store_true',
                     help='Add Actor-only and Critic-only Online control arms')
+    ap.add_argument('--isolate-qfpsi', action='store_true',
+                    help='Also compare Critic-only and both Online with pretrained '
+                         'Qf_psi(s) held fixed while other Critic outputs adapt')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -852,6 +905,8 @@ def main():
 
     if args.rollout_steps < 1 or args.seconds <= 0 or not np.isfinite(args.seconds):
         ap.error('rollout-steps and seconds must be positive')
+    if args.isolate_qfpsi and not args.ablation_components:
+        ap.error('--isolate-qfpsi requires --ablation-components')
     for lr in [args.actor_lr, args.critic_lr]:
         if not np.isfinite(lr) or lr <= 0:
             ap.error('learning rates must be positive and finite')
@@ -880,8 +935,11 @@ def main():
         ap.error('Use an empty output folder to preserve prior results')
 
     reference_metadata = install_evaluation_track(args.output, args.track, args.track_csv)
-    controllers = active_controllers(args.include_frozen_deterministic,
-                                     include_ablation=args.ablation_components)
+    controllers = active_controllers(
+        args.include_frozen_deterministic,
+        include_ablation=args.ablation_components,
+        isolate_qfpsi=args.isolate_qfpsi,
+    )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
@@ -918,6 +976,16 @@ def main():
                 'Only Critic updates Qf/value; Actor/Q/R network and Adam state stay frozen. '
                 'Both gradients are still computed: timing is diagnostic only.'
             ),
+            'ac_nmpc_critic_qfpsi_held': (
+                'Only Critic updates, but applied Qf_psi(s) and its value-term '
+                'derivative are held at the pretrained Critic FUNCTION. '
+                'All other Critic outputs adapt; diagnostic-only composition.'
+            ),
+            'ac_nmpc_online_qfpsi_held': (
+                'Actor+Critic update, but applied Qf_psi(s) is held at pretrained '
+                'Critic function. Other Critic outputs and Actor continue updating; '
+                'no standalone adapted checkpoint is produced.'
+            ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -934,6 +1002,7 @@ def main():
             'independent_evaluation_reference_from_file': args.track_csv is not None,
         },
         ablation_components=bool(args.ablation_components),
+        isolate_qfpsi=bool(args.isolate_qfpsi),
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -1003,6 +1072,13 @@ def main():
                     train_component=ABLATION_MODES[controller],
                     controller_label=controller,
                 )
+            elif controller in QFPSI_HOLD_MODES:
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario,
+                    train_component=QFPSI_HOLD_MODES[controller],
+                    controller_label=controller,
+                    hold_qfpsi=True,
+                )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
             m['reference_track'] = reference_metadata['id']
@@ -1025,6 +1101,8 @@ def main():
         qfpsi_rows = []
         targets = ['ac_nmpc_frozen', 'ac_nmpc_actor_only',
                    'ac_nmpc_critic_only', 'ac_nmpc_online']
+        if args.isolate_qfpsi:
+            targets.extend(QFPSI_HOLD_MODES)
         for scenario in scenarios:
             name = scenario['name']
             frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
