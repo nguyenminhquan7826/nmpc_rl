@@ -502,9 +502,10 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     profile = scenario['profile']
 
     original_learn = agent.learn
+    original_propose = agent.propose
     split_policy = SplitValueTerminalPolicy(agent) if split_critic else None
-    original_propose = (split_policy.propose if split_policy is not None
-                        else agent.propose)
+    policy_propose = (split_policy.propose if split_policy is not None
+                      else original_propose)
     original_step = env.step
 
     # Qf_psi(s) is masked at the FUNCTION level using an immutable pretrained
@@ -534,7 +535,7 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
 
     def timed_propose(*a, **kw):
         start = time.perf_counter_ns()
-        result = original_propose(*a, **kw)
+        result = policy_propose(*a, **kw)
         if hold_qfpsi:
             verify_frozen_qfpsi(result[0], float(frozen_qfpsi(a[0])))
         if projector is not None:
@@ -621,7 +622,8 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     logs.to_csv(args.output / f'{name}_{controller_label}.csv', index=False)
 
     # Preserve legacy output filenames for the original Online condition.
-    if train_component == 'both' and projector is None:
+    if (train_component == 'both' and projector is None
+            and not hold_qfpsi and split_policy is None):
         update_name = f'{name}_ac_updates.csv'
         checkpoint_name = f'{name}_ac_adapted_checkpoint.npz'
     else:
