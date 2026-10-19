@@ -13,9 +13,6 @@ from cad_eval_reference import prepare_cad_evaluation_reference
 from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
 from qfpsi_isolation import install_pretrained_qfpsi_function, verify_frozen_qfpsi
 from qfpsi_trust_region import QfPsiTrustProjector
-from split_critic_eval import SplitValueTerminalPolicy
-from split_terminal_pg import TerminalPsiScorePolicy
-from signed_qfpsi_sweep import SignedTerminalPsiPolicy
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -34,17 +31,6 @@ QFPSI_TRUST_MODES = {
     'ac_nmpc_critic_qfpsi_trust': 'critic',
     'ac_nmpc_online_qfpsi_trust': 'both',
 }
-SPLIT_CRITIC_FROZEN_TERMINAL = 'ac_nmpc_split_value_frozen_qf'
-SPLIT_QF_SAMPLED_FROZEN = 'ac_nmpc_split_qf_sampled_frozen'
-SPLIT_QF_POLICY_GRADIENT = 'ac_nmpc_split_qf_pg'
-SPLIT_QF_GAE = 'ac_nmpc_split_qf_gae'
-SIGNED_QFPSI_SWEEP_ARMS = {
-    'ac_nmpc_split_qfpsi_m05': -0.05,
-    'ac_nmpc_split_qfpsi_m02': -0.02,
-    'ac_nmpc_split_qfpsi_p00': 0.00,
-    'ac_nmpc_split_qfpsi_p02': +0.02,
-    'ac_nmpc_split_qfpsi_p05': +0.05,
-}
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
@@ -56,35 +42,16 @@ DISPLAY = {
     'ac_nmpc_online_qfpsi_held': 'Online both, Qf_psi held',
     'ac_nmpc_critic_qfpsi_trust': 'Critic-only, Qf_psi trust',
     'ac_nmpc_online_qfpsi_trust': 'Online both, Qf_psi trust',
-    'ac_nmpc_split_value_frozen_qf': 'Split Value+Terminal (Qf head frozen)',
-    'ac_nmpc_split_qf_sampled_frozen': 'Split, sampled Qf_psi (no Qf learning)',
-    'ac_nmpc_split_qf_pg': 'Split, sampled Qf_psi (policy-gradient learning)',
-    'ac_nmpc_split_qf_gae': 'Split, sampled Qf_psi (GAE policy-gradient learning)',
-    'ac_nmpc_split_qfpsi_m05': 'Split Qf_psi(s) pretrained x 0.95',
-    'ac_nmpc_split_qfpsi_m02': 'Split Qf_psi(s) pretrained x 0.98',
-    'ac_nmpc_split_qfpsi_p00': 'Split Qf_psi(s) pretrained x 1.00',
-    'ac_nmpc_split_qfpsi_p02': 'Split Qf_psi(s) pretrained x 1.02',
-    'ac_nmpc_split_qfpsi_p05': 'Split Qf_psi(s) pretrained x 1.05',
 }
 
 
 def active_controllers(include_frozen_deterministic=False, include_ablation=False,
-                       isolate_qfpsi=False, qfpsi_trust_frac=None,
-                       split_critic=False, split_qf_pg=False, split_qf_gae=False,
-                       signed_qfpsi_sweep=False):
+                       isolate_qfpsi=False, qfpsi_trust_frac=None):
     """Default roster unchanged; optional Qf_psi(s) control interventions."""
-    if signed_qfpsi_sweep and not split_critic:
-        raise ValueError('Phase 2D signed Qf_psi sweep requires --split-critic')
-    if split_qf_gae and not split_qf_pg:
-        raise ValueError('Phase 2C GAE requires --split-qf-policy-gradient')
-    if split_qf_pg and not split_critic:
-        raise ValueError('Phase 2B requires --split-critic')
     if isolate_qfpsi and not include_ablation:
         raise ValueError('Qf_psi isolation requires --ablation-components')
     if qfpsi_trust_frac is not None and not include_ablation:
         raise ValueError('Qf_psi trust evaluation requires --ablation-components')
-    if split_critic and not include_ablation:
-        raise ValueError('Split Critic evaluation requires --ablation-components')
     if not include_ablation:
         if include_frozen_deterministic:
             return ('fixed_nmpc', 'ac_nmpc_frozen',
@@ -103,14 +70,6 @@ def active_controllers(include_frozen_deterministic=False, include_ablation=Fals
         order.append('ac_nmpc_online_qfpsi_held')
     if qfpsi_trust_frac is not None:
         order.append('ac_nmpc_online_qfpsi_trust')
-    if split_critic:
-        order.append(SPLIT_CRITIC_FROZEN_TERMINAL)
-    if split_qf_pg:
-        order.extend((SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT))
-    if split_qf_gae:
-        order.append(SPLIT_QF_GAE)
-    if signed_qfpsi_sweep:
-        order.extend(SIGNED_QFPSI_SWEEP_ARMS)
     return tuple(order)
 
 
@@ -495,38 +454,13 @@ def run_fixed_nmpc(env, args, scenario):
 
 def run_ac_nmpc_online(env, agent, args, scenario, *,
                        train_component='both', controller_label='ac_nmpc_online',
-                       hold_qfpsi=False, trust_qfpsi_frac=None,
-                       split_critic=False, qfpg_mode=None,
-                       signed_qfpsi_frac=None):
+                       hold_qfpsi=False, trust_qfpsi_frac=None):
     """Sampled AC-NMPC with selective learning and Qf_psi interventions."""
     if train_component not in ('both', 'actor', 'critic'):
         raise ValueError('Unknown online ablation mode')
-    if qfpg_mode is not None and qfpg_mode not in (
-            SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT, SPLIT_QF_GAE):
-        raise ValueError('Unknown split terminal policy-gradient mode')
-    if qfpg_mode is not None and not split_critic:
-        raise ValueError('Terminal policy-gradient arm requires split Critic')
-    if signed_qfpsi_frac is not None and not split_critic:
-        raise ValueError('Signed Qf_psi sweep requires split Critic')
-    if signed_qfpsi_frac is not None and qfpg_mode is not None:
-        raise ValueError('Cannot combine Qfpsi signed sweep and Qf policy gradient')
-    if sum((bool(hold_qfpsi), trust_qfpsi_frac is not None,
-            bool(split_critic))) > 1:
-        raise ValueError('Select only one Qf intervention per controller')
-    if split_critic and train_component != 'both':
-        raise ValueError('Split Critic Phase 2A requires Actor+Value updates')
-    if qfpg_mode is not None:
-        expected = qfpg_mode
-    elif signed_qfpsi_frac is not None:
-        expected = next(
-            (k for k, v in SIGNED_QFPSI_SWEEP_ARMS.items()
-             if abs(v - float(signed_qfpsi_frac)) < 1e-12), None,
-        )
-        if expected is None:
-            raise ValueError('Unknown signed Qf_psi sweep fraction')
-    elif split_critic:
-        expected = SPLIT_CRITIC_FROZEN_TERMINAL
-    elif hold_qfpsi:
+    if hold_qfpsi and trust_qfpsi_frac is not None:
+        raise ValueError('Cannot combine gradient-hold and solver-only trust')
+    if hold_qfpsi:
         expected = next(
             (key for key, value in QFPSI_HOLD_MODES.items()
              if value == train_component), None,
@@ -555,25 +489,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
 
     original_learn = agent.learn
     original_propose = agent.propose
-    # Phase 2B uses a SEPARATE random generator for Qf exploration so
-    # original Actor Gaussian sampling is never consumed or shifted.
-    qfpg_seed = (20261019 if getattr(args, 'sampling_seed', None) is None
-                 else 1000003 + int(args.sampling_seed))
-    if qfpg_mode is not None:
-        split_policy = TerminalPsiScorePolicy(
-            agent, qf_seed=qfpg_seed, sigma=args.qfpg_sigma,
-            lr=args.qfpg_lr, trust_frac=args.qfpg_trust_frac,
-            trust_reg=args.qfpg_reg,
-            terminal_learning=(qfpg_mode != SPLIT_QF_SAMPLED_FROZEN),
-            gae_lambda=(args.qfpg_gae_lambda
-                        if qfpg_mode == SPLIT_QF_GAE else 0.0),
-        )
-    elif signed_qfpsi_frac is not None:
-        split_policy = SignedTerminalPsiPolicy(agent, signed_qfpsi_frac)
-    else:
-        split_policy = SplitValueTerminalPolicy(agent) if split_critic else None
-    policy_propose = (split_policy.propose if split_policy is not None
-                      else original_propose)
     original_step = env.step
 
     # Qf_psi(s) is masked at the FUNCTION level using an immutable pretrained
@@ -594,21 +509,16 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
 
     def timed_learn(rows):
         start = time.perf_counter_ns()
-        # Compute Qf score-function advantages with the same PRE-UPDATE
-        # Value Critic used by the Actor and TD bootstrapping. Never
-        # backpropagate the Critic TD loss into the terminal network.
-        qf_metrics = (split_policy.update_terminal(rows)
-                      if qfpg_mode is not None else {})
         result = learn_selected_component(
             agent, rows, train_component, learn_fn=original_learn,
         )
         elapsed = (time.perf_counter_ns() - start) / 1e6
         learn_call_times.append(elapsed)
-        return {**result, **qf_metrics, 'learn_ms': elapsed}
+        return {**result, 'learn_ms': elapsed}
 
     def timed_propose(*a, **kw):
         start = time.perf_counter_ns()
-        result = policy_propose(*a, **kw)
+        result = original_propose(*a, **kw)
         if hold_qfpsi:
             verify_frozen_qfpsi(result[0], float(frozen_qfpsi(a[0])))
         if projector is not None:
@@ -665,44 +575,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         )
 
     logs['env_step_wall_ms'] = np.asarray(step_timing, dtype=float)
-    if signed_qfpsi_frac is not None:
-        if len(split_policy.audit) != n:
-            raise RuntimeError('Signed Qf_psi audit/solver log alignment failed')
-        signed_log = pd.DataFrame(split_policy.audit)
-        for col in signed_log.columns:
-            logs[col] = signed_log[col].to_numpy()
-        signed_log.to_csv(
-            args.output / f'{name}_{controller_label}_signed_audit.csv',
-            index=False,
-        )
-        if not np.allclose(
-            logs['qf_2'].to_numpy(float),
-            logs['qfsweep_applied_psi'].to_numpy(float),
-            rtol=1e-10, atol=1e-8,
-        ):
-            raise RuntimeError('Applied signed Qf_psi disagrees with NMPC log')
-        if not np.allclose(
-            logs['qfsweep_ratio'].to_numpy(float),
-            1.0 + float(signed_qfpsi_frac),
-            rtol=0, atol=1e-12,
-        ):
-            raise RuntimeError('Qf_psi sweep ratio outside requested offset')
-    if qfpg_mode is not None:
-        if len(split_policy.sample_audit) != n or split_policy.pending:
-            raise RuntimeError('Terminal Qf sampling/update audit misalignment')
-        qfpg_log = pd.DataFrame(split_policy.sample_audit)
-        for column in qfpg_log.columns:
-            logs[column] = qfpg_log[column].to_numpy()
-        qfpg_log.to_csv(
-            args.output / f'{name}_{controller_label}_qfpg_audit.csv',
-            index=False,
-        )
-        if not np.allclose(
-            logs['qf_2'].to_numpy(float),
-            logs['qfpg_applied_psi'].to_numpy(float),
-            rtol=1e-10, atol=1e-8,
-        ):
-            raise RuntimeError('Logged Qf_psi was not the applied sampled/clip weight')
     if projector is not None:
         if len(projection_records) != n:
             raise RuntimeError('Qf_psi projection audit/sample log alignment failed')
@@ -733,37 +605,17 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     logs.to_csv(args.output / f'{name}_{controller_label}.csv', index=False)
 
     # Preserve legacy output filenames for the original Online condition.
-    if (train_component == 'both' and projector is None
-            and not hold_qfpsi and split_policy is None):
+    if train_component == 'both' and projector is None:
         update_name = f'{name}_ac_updates.csv'
         checkpoint_name = f'{name}_ac_adapted_checkpoint.npz'
     else:
         update_name = f'{name}_{controller_label}_updates.csv'
         checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
     pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
-    # Held/trust/split arms depend on a separate immutable reference/head.
+    # Held/trust arms depend on an immutable pretrained reference Critic.
     # A single Agent checkpoint alone cannot replay these composed policies.
-    if not hold_qfpsi and projector is None and split_policy is None:
+    if not hold_qfpsi and projector is None:
         agent.save(args.output / checkpoint_name)
-    if qfpg_mode is None:
-        if split_policy is not None and not split_policy.terminal_unchanged():
-            raise RuntimeError('Value Critic TD gradient leaked into terminal Qf network')
-    else:
-        if not split_policy.inactive_weights_unchanged():
-            raise RuntimeError('Qfpg modified frozen terminal features or non-psi outputs')
-        checked_states = np.asarray([
-            split_policy.sample_states[j]
-            for j in sorted(set((0, n // 2, n - 1)))
-        ])
-        if not split_policy.initial_function_unchanged_for_other_five(checked_states):
-            raise RuntimeError('Frozen Qf components changed at rollout observations')
-        if split_policy.terminal_learning and split_policy.qf_training_updates != len(updates):
-            raise RuntimeError('Qfpg updates do not align with rollout updates')
-        if not split_policy.terminal_learning and not split_policy.terminal_unchanged():
-            raise RuntimeError('Terminal sampled-frozen control unexpectedly updated')
-        if (split_policy.terminal_learning and
-                split_policy.terminal_unchanged()):
-            raise RuntimeError('Terminal Qf learner made no parameter update')
     unchanged_actor = net_unchanged(agent.actor, initial_actor)
     unchanged_critic = net_unchanged(agent.critic, initial_critic)
     if train_component == 'actor' and not unchanged_critic:
@@ -778,24 +630,6 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         train_component=train_component,
         qfpsi_function_held_at_checkpoint=bool(hold_qfpsi),
         qfpsi_solver_only_trust=projector is not None,
-        split_value_terminal_networks=split_policy is not None,
-        split_qf_head_unchanged=(None if split_policy is None
-                                 else split_policy.terminal_unchanged()),
-        split_qf_head_training_enabled=(
-            bool(split_policy.terminal_learning) if qfpg_mode is not None else False
-        ),
-        split_qf_head_untouched_components_unchanged=(
-            None if qfpg_mode is None else split_policy.inactive_weights_unchanged()
-        ),
-        split_qf_head_training_updates=(
-            None if qfpg_mode is None else split_policy.qf_training_updates
-        ),
-        qfpg_mode=qfpg_mode,
-        qfpg_independent_sampling_seed=(qfpg_seed if qfpg_mode is not None else None),
-        qfpsi_signed_sweep=(signed_qfpsi_frac is not None),
-        qfpsi_signed_offset_frac=signed_qfpsi_frac,
-        qfpsi_signed_scale=(None if signed_qfpsi_frac is None
-                             else 1.0 + signed_qfpsi_frac),
         qfpsi_trust_frac=(None if projector is None else projector.trust_pct),
         qfpsi_trust_projected_pct=(
             None if projector is None else float(
@@ -803,9 +637,7 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
                                  for a in projection_records])
             )
         ),
-        adapted_checkpoint_saved=(
-            not hold_qfpsi and projector is None and split_policy is None
-        ),
+        adapted_checkpoint_saved=not hold_qfpsi and projector is None,
         actor_unchanged_from_checkpoint=unchanged_actor,
         critic_unchanged_from_checkpoint=unchanged_critic,
         actor_parameter_change_norm=net_parameter_change_norm(
@@ -1021,25 +853,6 @@ def build_pairwise_long(comparison):
          'ac_nmpc_online'),
         ('qfpsi_trust_both_vs_frozen', 'ac_nmpc_online_qfpsi_trust',
          'ac_nmpc_frozen'),
-        ('split_value_frozen_qf_vs_frozen', SPLIT_CRITIC_FROZEN_TERMINAL,
-         'ac_nmpc_frozen'),
-        ('split_value_frozen_qf_vs_online', SPLIT_CRITIC_FROZEN_TERMINAL,
-         'ac_nmpc_online'),
-        ('split_value_frozen_qf_vs_trust0', SPLIT_CRITIC_FROZEN_TERMINAL,
-         'ac_nmpc_online_qfpsi_trust'),
-        ('qfpg_vs_sampled_frozen', SPLIT_QF_POLICY_GRADIENT,
-         SPLIT_QF_SAMPLED_FROZEN),
-        ('qfpg_vs_split_frozen', SPLIT_QF_POLICY_GRADIENT,
-         SPLIT_CRITIC_FROZEN_TERMINAL),
-        ('qfpg_vs_original_online', SPLIT_QF_POLICY_GRADIENT,
-         'ac_nmpc_online'),
-        ('qfgae_vs_one_step_pg', SPLIT_QF_GAE,
-         SPLIT_QF_POLICY_GRADIENT),
-        ('qfgae_vs_sampled_frozen', SPLIT_QF_GAE,
-         SPLIT_QF_SAMPLED_FROZEN),
-        *((f'qfpsi_signed_{k}_vs_zero', k, 'ac_nmpc_split_qfpsi_p00')
-          for k in SIGNED_QFPSI_SWEEP_ARMS
-          if k != 'ac_nmpc_split_qfpsi_p00'),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -1109,95 +922,6 @@ def initial_sampled_pairing(output, scenario, rollout_steps):
     }
 
 
-def phase2b_initial_pairing(output, scenario, rollout_steps):
-    """Pair TWO stochastic Qf arms before gradient update.
-
-    These modes deliberately differ from Frozen at step 1 due to new
-    terminal exploration; comparing their pre-update prefix to standard
-    Frozen would be an invalid fairness claim. Instead compare them with
-    each other: identical Actor RNG, Qf RNG, plant and checkpoint.
-    """
-    a = pd.read_csv(
-        Path(output) / f'{scenario}_{SPLIT_QF_SAMPLED_FROZEN}.csv'
-    )
-    b = pd.read_csv(
-        Path(output) / f'{scenario}_{SPLIT_QF_POLICY_GRADIENT}.csv'
-    )
-    n = min(len(a), len(b), int(rollout_steps))
-    weights = [f'q_{i}' for i in range(6)]
-    weights += [f'r_{i}' for i in range(2)]
-    weights += [f'qf_{i}' for i in range(6)]
-    if n < 1 or any(x not in a or x not in b for x in weights):
-        raise RuntimeError('Missing stochastic Qf pairing weights')
-    d_weights = float(np.max(np.abs(
-        a.loc[:n-1, weights].to_numpy(float)
-        - b.loc[:n-1, weights].to_numpy(float)
-    )))
-    d_cte = float(np.max(np.abs(
-        a['cte_m'].to_numpy(float)[:n]
-        - b['cte_m'].to_numpy(float)[:n]
-    )))
-    matched = bool(d_weights <= 1e-8 and d_cte <= 1e-8)
-    if not matched:
-        raise RuntimeError(
-            f'Unfair stochastic Qf pre-update sample prefix: '
-            f'{scenario}, max_abs_weight={d_weights}, '
-            f'max_abs_cte={d_cte}'
-        )
-    return {
-        'scenario': scenario,
-        'pre_update_steps': int(n),
-        'sampled_frozen_controller': SPLIT_QF_SAMPLED_FROZEN,
-        'sampled_learned_controller': SPLIT_QF_POLICY_GRADIENT,
-        'max_abs_weight_difference': d_weights,
-        'max_abs_cte_difference_m': d_cte,
-        'matched_weight_prefix': d_weights <= 1e-8,
-        'matched_cte_prefix': d_cte <= 1e-8,
-        'pairing_with_standard_frozen_applicable': False,
-        'note': 'Qf sampled in both arms from step one; '
-                'same initial Actor/Qf samples before first learning update',
-    }
-
-
-def phase2c_initial_pairing(output, scenario, rollout_steps):
-    """Ensure GAE and one-step heads see same stochastic pre-update prefix."""
-    left = pd.read_csv(
-        Path(output) / f'{scenario}_{SPLIT_QF_POLICY_GRADIENT}.csv'
-    )
-    right = pd.read_csv(
-        Path(output) / f'{scenario}_{SPLIT_QF_GAE}.csv'
-    )
-    n = min(len(left), len(right), int(rollout_steps))
-    weights = [f'q_{i}' for i in range(6)]
-    weights += [f'r_{i}' for i in range(2)]
-    weights += [f'qf_{i}' for i in range(6)]
-    if n < 1 or any(col not in left or col not in right for col in weights):
-        raise RuntimeError('Missing GAE vs one-step Qf pairing data')
-    max_weight = float(np.max(np.abs(
-        left.loc[:n-1, weights].to_numpy(float)
-        - right.loc[:n-1, weights].to_numpy(float)
-    )))
-    max_cte = float(np.max(np.abs(
-        left['cte_m'].to_numpy(float)[:n]
-        - right['cte_m'].to_numpy(float)[:n]
-    )))
-    if max_weight > 1e-8 or max_cte > 1e-8:
-        raise RuntimeError(
-            f'GAE and one-step Qf arms not paired at {scenario}: '
-            f'weight={max_weight}, cte={max_cte}'
-        )
-    return {
-        'scenario': scenario,
-        'pre_update_steps': n,
-        'baseline': SPLIT_QF_POLICY_GRADIENT,
-        'candidate': SPLIT_QF_GAE,
-        'max_abs_weight_difference': max_weight,
-        'max_abs_cte_difference_m': max_cte,
-        'matched_weight_prefix': True,
-        'matched_cte_prefix': True,
-    }
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--checkpoint', type=Path, required=True)
@@ -1233,33 +957,6 @@ def main():
                     help='Evaluation only: keep applied solver Qf_psi(s) within '
                          '(1 +/- frac) of pretrained Critic output; Critic TD '
                          'learning is unchanged. Example 0.10 = +/-10%%.')
-    ap.add_argument('--split-critic', action='store_true',
-                    help='Evaluation only, Phase 2A: clone pretrained Critic into '
-                         'independent Value network (learns TD-Huber) and 6-output '
-                         'Terminal network (frozen). Both Actor/Value update.')
-    ap.add_argument('--split-qf-policy-gradient', action='store_true',
-                    help='Phase 2B: add paired stochastic Qf_psi sampled-frozen '
-                         'and reward-driven policy-gradient terminal-head arms. '
-                         'Requires --split-critic and --ablation-components.')
-    ap.add_argument('--qfpsi-signed-sweep', action='store_true',
-                    help='Phase 2D: run independent split-Value/Actor-online '
-                         'NMPC arms with pretrained Qf_psi(s) scaled by '
-                         '-5%%, -2%%, 0%%, +2%%, +5%%. No Qf learning; '
-                         'requires --split-critic and --ablation-components.')
-    ap.add_argument('--split-qf-gae', action='store_true',
-                    help='Phase 2C: add GAE(lambda) Qf_psi learning arm, '
-                         'paired with unchanged one-step Qf PG. Requires '
-                         '--split-qf-policy-gradient.')
-    ap.add_argument('--qfpg-gae-lambda', type=float, default=0.95,
-                    help='Phase 2C GAE lambda in [0,1]; 0 is exact one-step TD.')
-    ap.add_argument('--qfpg-sigma', type=float, default=0.02,
-                    help='Latent-logit Gaussian Qf_psi exploration sigma')
-    ap.add_argument('--qfpg-lr', type=float, default=0.0001,
-                    help='Independent terminal Qf_psi output-layer Adam learning rate')
-    ap.add_argument('--qfpg-trust-frac', type=float, default=0.05,
-                    help='Hard Qf_psi solver-input trust band around pretrained Qf(s)')
-    ap.add_argument('--qfpg-reg', type=float, default=0.10,
-                    help='Penalty for log Qf_psi(mean)/Qf_psi(pretrained) drift')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -1285,27 +982,6 @@ def main():
         ap.error('--sampling-seed must be a non-negative integer')
     if args.isolate_qfpsi and not args.ablation_components:
         ap.error('--isolate-qfpsi requires --ablation-components')
-    if args.split_critic and not args.ablation_components:
-        ap.error('--split-critic requires --ablation-components')
-    if args.split_qf_policy_gradient and not args.split_critic:
-        ap.error('--split-qf-policy-gradient requires --split-critic')
-    if args.split_qf_gae and not args.split_qf_policy_gradient:
-        ap.error('--split-qf-gae requires --split-qf-policy-gradient')
-    if args.qfpsi_signed_sweep and not args.split_critic:
-        ap.error('--qfpsi-signed-sweep requires --split-critic')
-    if args.qfpsi_signed_sweep and (
-            args.split_qf_policy_gradient or args.split_qf_gae):
-        ap.error('Run signed sweep separately from Qf policy-gradient/GAE arms')
-    if not np.isfinite(args.qfpg_gae_lambda) or not 0. <= args.qfpg_gae_lambda <= 1.:
-        ap.error('--qfpg-gae-lambda must be in [0,1]')
-    if not np.isfinite(args.qfpg_sigma) or not 0. < args.qfpg_sigma <= 1.:
-        ap.error('--qfpg-sigma must be in (0,1]')
-    if not np.isfinite(args.qfpg_lr) or not 0. < args.qfpg_lr <= .01:
-        ap.error('--qfpg-lr must be in (0,0.01]')
-    if not np.isfinite(args.qfpg_trust_frac) or not 0. < args.qfpg_trust_frac <= .25:
-        ap.error('--qfpg-trust-frac must be in (0,0.25]')
-    if not np.isfinite(args.qfpg_reg) or not 0. <= args.qfpg_reg <= 100.:
-        ap.error('--qfpg-reg must be in [0,100]')
     if args.qfpsi_trust_frac is not None:
         if not args.ablation_components:
             ap.error('--qfpsi-trust-frac requires --ablation-components')
@@ -1346,10 +1022,6 @@ def main():
         include_ablation=args.ablation_components,
         isolate_qfpsi=args.isolate_qfpsi,
         qfpsi_trust_frac=args.qfpsi_trust_frac,
-        split_critic=args.split_critic,
-        split_qf_pg=args.split_qf_policy_gradient,
-        split_qf_gae=args.split_qf_gae,
-        signed_qfpsi_sweep=args.qfpsi_signed_sweep,
     )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
@@ -1407,37 +1079,6 @@ def main():
                 'solver Qf_psi is projected around pretrained Qf_psi(s). '
                 'No standalone adapted checkpoint or stability certificate.'
             ),
-            SPLIT_CRITIC_FROZEN_TERMINAL: (
-                'Phase 2A: original checkpoint Critic split into independent '
-                '7-output TD-Huber Value network and 6-output frozen terminal '
-                'Qf network; Actor and Value update, no TD gradient reaches '
-                'terminal policy. No standalone checkpoint or stability proof.'
-            ),
-            SPLIT_QF_SAMPLED_FROZEN: (
-                'Phase 2B stochastic Qf_psi logit exploration with independent '
-                'RNG and hard pretrained-relative trust; NO Qf network update. '
-                'Actor and TD-Huber Value still update. Exploration control.'
-            ),
-            SPLIT_QF_POLICY_GRADIENT: (
-                'Phase 2B: identical stochastic terminal exploration as paired '
-                'frozen control; reward-based score-function Qf_psi update '
-                'through independent output-column/bias ONLY, with log-trust '
-                'regularization and hard solver trust. Value trained via '
-                'unchanged TD-Huber; no formal stability guarantee.'
-            ),
-            SPLIT_QF_GAE: (
-                'Phase 2C: as Phase 2B one-step PG, but terminal Qf_psi '
-                'advantage uses batch-truncated GAE(lambda) from SAME '
-                'pre-update Value Critic. Actor/TD-Huber and RNG unchanged, '
-                'only terminal head output column learns; no stability proof.'
-            ),
-            **{k: (
-                'Phase 2D: signed Qf_psi sensitivity, ONLY applied '
-                'pretrained state-dependent terminal heading weight is '
-                f'scaled by (1 + {frac:+.2f}); other five Qf frozen. '
-                'Actor/Value TD-Huber update unchanged; no Qf learning '
-                'and no stability certificate.'
-            ) for k, frac in SIGNED_QFPSI_SWEEP_ARMS.items()},
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -1459,28 +1100,6 @@ def main():
         qfpsi_trust_frac=args.qfpsi_trust_frac,
         qfpsi_trust_method='solver_input_only_pretrained_state_dependent',
         qfpsi_trust_is_stability_certificate=False,
-        split_critic=bool(args.split_critic),
-        split_critic_stage=('Phase_2C_truncated_GAE'
-                            if args.split_qf_gae else
-                            'Phase_2B_stochastic_score_function'
-                            if args.split_qf_policy_gradient
-                            else 'Phase_2A_value_TD_qf_frozen'),
-        split_qf_policy_gradient=bool(args.split_qf_policy_gradient),
-        split_qf_gae=bool(args.split_qf_gae),
-        qfpsi_signed_sweep=bool(args.qfpsi_signed_sweep),
-        qfpsi_signed_offsets=list(SIGNED_QFPSI_SWEEP_ARMS.values()),
-        qfpsi_signed_qf_learning_enabled=False,
-        qfpg_gae_lambda=args.qfpg_gae_lambda,
-        qfpg_gae_one_step_comparator_lambda=0.0,
-        qfpg_gae_batch_boundary='bootstrap_last_nonterminal_transition',
-        qfpg_sigma=args.qfpg_sigma,
-        qfpg_lr=args.qfpg_lr,
-        qfpg_trust_frac=args.qfpg_trust_frac,
-        qfpg_reg=args.qfpg_reg,
-        qfpg_rng_policy='separate_numpy_rng_does_not_advance_actor_sampling',
-        qfpg_no_formal_stability_guarantee=True,
-        qfpg_original_frozen_preupdate_prefix_applicable=False,
-        qfpg_comparison_control='stochastic_qf_same_seed_no_qf_learning',
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -1533,8 +1152,6 @@ def main():
     scenarios = build_scenarios(args)
     results = []
     sampled_pairing = []
-    phase2b_pairing_rows = []
-    phase2c_pairing_rows = []
 
     for scenario in scenarios:
         for controller in controllers:
@@ -1572,24 +1189,6 @@ def main():
                     controller_label=controller,
                     trust_qfpsi_frac=args.qfpsi_trust_frac,
                 )
-            elif controller == SPLIT_CRITIC_FROZEN_TERMINAL:
-                m = run_ac_nmpc_online(
-                    env, fresh_agent(args, meta), args, scenario,
-                    controller_label=controller, split_critic=True,
-                )
-            elif controller in (SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT,
-                                SPLIT_QF_GAE):
-                m = run_ac_nmpc_online(
-                    env, fresh_agent(args, meta), args, scenario,
-                    controller_label=controller, split_critic=True,
-                    qfpg_mode=controller,
-                )
-            elif controller in SIGNED_QFPSI_SWEEP_ARMS:
-                m = run_ac_nmpc_online(
-                    env, fresh_agent(args, meta), args, scenario,
-                    controller_label=controller, split_critic=True,
-                    signed_qfpsi_frac=SIGNED_QFPSI_SWEEP_ARMS[controller],
-                )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
             m['reference_track'] = reference_metadata['id']
@@ -1602,103 +1201,8 @@ def main():
         pd.DataFrame(sampled_pairing).to_csv(
             args.output / 'initial_sampled_pairing.csv', index=False
         )
-        if args.split_qf_policy_gradient:
-            phase2b_pairing_rows.append(phase2b_initial_pairing(
-                args.output, scenario['name'], args.rollout_steps,
-            ))
-            pd.DataFrame(phase2b_pairing_rows).to_csv(
-                args.output / 'phase2b_sampled_pairing.csv', index=False,
-            )
-        if args.split_qf_gae:
-            phase2c_pairing_rows.append(phase2c_initial_pairing(
-                args.output, scenario['name'], args.rollout_steps,
-            ))
-            pd.DataFrame(phase2c_pairing_rows).to_csv(
-                args.output / 'phase2c_advantage_pairing.csv', index=False,
-            )
 
     comparison = pd.DataFrame(results)
-    if args.qfpsi_signed_sweep:
-        # Zero signed offset must reproduce Phase 2A over the ENTIRE
-        # simulated route, not merely at the first action/prefix.
-        zero_parity = []
-        for scenario in scenarios:
-            name = scenario['name']
-            zero = pd.read_csv(
-                args.output / f'{name}_ac_nmpc_split_qfpsi_p00.csv'
-            )
-            phase2a = pd.read_csv(
-                args.output / f'{name}_{SPLIT_CRITIC_FROZEN_TERMINAL}.csv'
-            )
-            weight_cols = [f'q_{i}' for i in range(6)]
-            weight_cols += [f'r_{i}' for i in range(2)]
-            weight_cols += [f'qf_{i}' for i in range(6)]
-            same_steps = len(zero) == len(phase2a)
-            if not same_steps:
-                raise RuntimeError('Signed 0% and Phase 2A rollout length differ')
-            weight_diff = float(np.max(np.abs(
-                zero[weight_cols].to_numpy(float) -
-                phase2a[weight_cols].to_numpy(float)
-            )))
-            cte_diff = float(np.max(np.abs(
-                zero['cte_m'].to_numpy(float) -
-                phase2a['cte_m'].to_numpy(float)
-            )))
-            zero_parity.append({
-                'scenario': name,
-                'n_steps': len(zero),
-                'max_abs_weight_diff': weight_diff,
-                'max_abs_cte_diff_m': cte_diff,
-                'matched_full_weights': bool(weight_diff <= 1e-8),
-                'matched_full_cte': bool(cte_diff <= 1e-8),
-            })
-            if weight_diff > 1e-8 or cte_diff > 1e-8:
-                raise RuntimeError(
-                    f'Signed zero intervention differs from exact Phase 2A '
-                    f'at {name}: weight_diff={weight_diff}, cte_diff={cte_diff}'
-                )
-        pd.DataFrame(zero_parity).to_csv(
-            args.output / 'signed_qfpsi_zero_parity.csv',
-            index=False,
-        )
-        signed_summary = []
-        for scenario_name, group in comparison.groupby('scenario', sort=False):
-            idx = group.set_index('controller')
-            baseline = idx.loc['ac_nmpc_split_qfpsi_p00']
-            for controller, frac in SIGNED_QFPSI_SWEEP_ARMS.items():
-                row = idx.loc[controller]
-                signed_summary.append({
-                    'scenario': scenario_name,
-                    'controller': controller,
-                    'signed_offset_pct': 100.0 * frac,
-                    'mean_cte_post_cm': 100. * float(row['mean_cte_post_m']),
-                    'max_cte_post_cm': 100. * float(row['max_cte_post_m']),
-                    'heading_rmse_post_rad': float(row['rmse_heading_post_rad']),
-                    'reward': float(row['return']),
-                    'reached_end': bool(row['reached_end']),
-                    'solver_success_pct': float(row['solver_success_pct']),
-                    'solve_p95_ms': float(row['solve_p95_ms']),
-                    'updates': int(row['updates']),
-                    'delta_mean_cte_post_cm_vs_zero': 100. * (
-                        float(row['mean_cte_post_m']) -
-                        float(baseline['mean_cte_post_m'])
-                    ),
-                    'delta_max_cte_post_cm_vs_zero': 100. * (
-                        float(row['max_cte_post_m']) -
-                        float(baseline['max_cte_post_m'])
-                    ),
-                    'delta_heading_rmse_post_rad_vs_zero': (
-                        float(row['rmse_heading_post_rad']) -
-                        float(baseline['rmse_heading_post_rad'])
-                    ),
-                    'delta_reward_vs_zero': (
-                        float(row['return']) - float(baseline['return'])
-                    ),
-                })
-        pd.DataFrame(signed_summary).to_csv(
-            args.output / 'signed_qfpsi_sensitivity.csv',
-            index=False,
-        )
     if args.ablation_components:
         # Pair ALL Online arms against the same sampled Frozen prefix. Before
         # step 16 no gradient was applied, so first actions/weights/CTE
@@ -1711,14 +1215,6 @@ def main():
             targets.extend(QFPSI_HOLD_MODES)
         if args.qfpsi_trust_frac is not None:
             targets.extend(QFPSI_TRUST_MODES)
-        if args.split_critic:
-            targets.append(SPLIT_CRITIC_FROZEN_TERMINAL)
-        if args.qfpsi_signed_sweep:
-            targets.append('ac_nmpc_split_qfpsi_p00')
-        # All nonzero signed Qfpsi arms differ from Frozen BEFORE training,
-        # so only the ZERO signed arm belongs to the original Frozen pairing.
-        # Qf stochastic arms intentionally differ from Frozen BEFORE training;
-        # compare those TWO paired stochastic arms separately, not with Frozen.
         for scenario in scenarios:
             name = scenario['name']
             frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
