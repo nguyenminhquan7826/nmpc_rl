@@ -54,3 +54,58 @@ The deterministic mode is an optional fourth controller, not a substitute for th
 - initial_sampled_pairing.csv: action and CTE prefix equivalence before first Online update.
 
 A single new reference is a first OOD test, not a proof of universal generalization. Its difficulty may differ from training even when speed and length are matched. Examine completion, solver and deadline performance alongside CTE, then repeat on other unseen tracks and multiple seeds.
+
+
+## Real CAD train/test split (NEW: --track-csv)
+
+**Training remains on the ORIGINAL CAD:** no changes to baseline.py,
+rl_nmpc.py, xref_states_smoothed.csv or xref_states_controller.csv.
+The original R3A Huber checkpoint can be evaluated on a new 10.704 m
+AutoCAD track without retraining. Do not copy the new CAD over either
+training reference CSV.
+
+PowerShell (reuse your ONLY evaluation worktree, with no new worktree):
+
+    cd D:\GitHub\RL_NMPC\Code\nmpc_rl_frozen_online
+    git status --short
+    git fetch origin
+    git restore --source=origin/experiment/frozen-vs-online-ac-nmpc -- nmpc_casadi/adapt_nmpc.py nmpc_casadi/cad_eval_reference.py nmpc_casadi/test_cad_eval_reference.py nmpc_casadi/FROZEN_ONLINE_EVAL.md
+    cd nmpc_casadi
+    python -m unittest -v test_reward_r1 test_critic_huber_r2a test_adapt_frozen test_heldout_reference test_cad_eval_reference
+
+Review and back up any personal edits BEFORE using git restore.
+
+Copy the uploaded xref_states_cad_test.csv to an independently named
+location, e.g.:
+
+    D:\GitHub\RL_NMPC\Code\experiment_archive\cad_refs\xref_states_cad_test.csv
+
+Keep that file outside the training project. The evaluator copies it into
+a NEW run folder and adds an evaluation-only virtual horizon tail. Original
+XREF bytes and profile v_ref(s) are preserved; no speed rewrite to 0.10 m/s.
+The CSV is validated against the current NMPC test speed envelope
+0.05 <= vx_ref <= 0.10 m/s and steering bounds. A speed profile below
+0.05 m/s requires changing the model/experiment settings intentionally,
+not silently clipping or elevating the requested speed.
+
+Run one short smoke check:
+
+    $ck = 'D:\GitHub\RL_NMPC\Code\experiment_archive\SELECTED_R3A_HUBER_LR003\checkpoint_best_tracking.npz'
+    $cad = 'D:\GitHub\RL_NMPC\Code\experiment_archive\cad_refs\xref_states_cad_test.csv'
+    python adapt_nmpc.py --track-csv $cad --checkpoint $ck --output ..\..\experiment_archive\eval_cad_smoke --nominal-only --seconds 3 --rollout-steps 16 --actor-lr 0.001 --critic-lr 0.001 --seed 0
+
+This is an integration-only test (the route is >10 m). Check
+reference_manifest.json: id=cad_eval_external,
+profile_preserved_from_source=true, training and reference source SHA-256.
+Check initial_sampled_pairing.csv for matched_weight_prefix and matched_cte_prefix.
+
+Run the full CAD Evaluation on four physical plant conditions:
+
+    python adapt_nmpc.py --track-csv $cad --checkpoint $ck --output ..\..\experiment_archive\eval_cad_fixed_frozen_online --scenario-set physical --seconds 150 --rollout-steps 16 --actor-lr 0.001 --critic-lr 0.001 --seed 0 --include-frozen-deterministic
+
+Never reuse an occupied output folder. A single new CAD track assesses
+transfer to that geometry, not universal generalization; use additional
+independent CADs and seeds for robust conclusions. Any speed variation
+in the new evaluation source changes both geometry and reference-speed
+distribution relative to pretrained 0.10 m/s training. If necessary
+use a separate constant-speed evaluation control to isolate geometry.
