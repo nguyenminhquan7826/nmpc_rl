@@ -36,6 +36,7 @@ QFPSI_TRUST_MODES = {
 SPLIT_CRITIC_FROZEN_TERMINAL = 'ac_nmpc_split_value_frozen_qf'
 SPLIT_QF_SAMPLED_FROZEN = 'ac_nmpc_split_qf_sampled_frozen'
 SPLIT_QF_POLICY_GRADIENT = 'ac_nmpc_split_qf_pg'
+SPLIT_QF_GAE = 'ac_nmpc_split_qf_gae'
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
@@ -50,13 +51,16 @@ DISPLAY = {
     'ac_nmpc_split_value_frozen_qf': 'Split Value+Terminal (Qf head frozen)',
     'ac_nmpc_split_qf_sampled_frozen': 'Split, sampled Qf_psi (no Qf learning)',
     'ac_nmpc_split_qf_pg': 'Split, sampled Qf_psi (policy-gradient learning)',
+    'ac_nmpc_split_qf_gae': 'Split, sampled Qf_psi (GAE policy-gradient learning)',
 }
 
 
 def active_controllers(include_frozen_deterministic=False, include_ablation=False,
                        isolate_qfpsi=False, qfpsi_trust_frac=None,
-                       split_critic=False, split_qf_pg=False):
+                       split_critic=False, split_qf_pg=False, split_qf_gae=False):
     """Default roster unchanged; optional Qf_psi(s) control interventions."""
+    if split_qf_gae and not split_qf_pg:
+        raise ValueError('Phase 2C GAE requires --split-qf-policy-gradient')
     if split_qf_pg and not split_critic:
         raise ValueError('Phase 2B requires --split-critic')
     if isolate_qfpsi and not include_ablation:
@@ -87,6 +91,8 @@ def active_controllers(include_frozen_deterministic=False, include_ablation=Fals
         order.append(SPLIT_CRITIC_FROZEN_TERMINAL)
     if split_qf_pg:
         order.extend((SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT))
+    if split_qf_gae:
+        order.append(SPLIT_QF_GAE)
     return tuple(order)
 
 
@@ -477,7 +483,7 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     if train_component not in ('both', 'actor', 'critic'):
         raise ValueError('Unknown online ablation mode')
     if qfpg_mode is not None and qfpg_mode not in (
-            SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT):
+            SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT, SPLIT_QF_GAE):
         raise ValueError('Unknown split terminal policy-gradient mode')
     if qfpg_mode is not None and not split_critic:
         raise ValueError('Terminal policy-gradient arm requires split Critic')
@@ -528,7 +534,9 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
             agent, qf_seed=qfpg_seed, sigma=args.qfpg_sigma,
             lr=args.qfpg_lr, trust_frac=args.qfpg_trust_frac,
             trust_reg=args.qfpg_reg,
-            terminal_learning=(qfpg_mode == SPLIT_QF_POLICY_GRADIENT),
+            terminal_learning=(qfpg_mode != SPLIT_QF_SAMPLED_FROZEN),
+            gae_lambda=(args.qfpg_gae_lambda
+                        if qfpg_mode == SPLIT_QF_GAE else 0.0),
         )
     else:
         split_policy = SplitValueTerminalPolicy(agent) if split_critic else None
@@ -967,6 +975,10 @@ def build_pairwise_long(comparison):
          SPLIT_CRITIC_FROZEN_TERMINAL),
         ('qfpg_vs_original_online', SPLIT_QF_POLICY_GRADIENT,
          'ac_nmpc_online'),
+        ('qfgae_vs_one_step_pg', SPLIT_QF_GAE,
+         SPLIT_QF_POLICY_GRADIENT),
+        ('qfgae_vs_sampled_frozen', SPLIT_QF_GAE,
+         SPLIT_QF_SAMPLED_FROZEN),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -1086,6 +1098,45 @@ def phase2b_initial_pairing(output, scenario, rollout_steps):
     }
 
 
+def phase2c_initial_pairing(output, scenario, rollout_steps):
+    """Ensure GAE and one-step heads see same stochastic pre-update prefix."""
+    left = pd.read_csv(
+        Path(output) / f'{scenario}_{SPLIT_QF_POLICY_GRADIENT}.csv'
+    )
+    right = pd.read_csv(
+        Path(output) / f'{scenario}_{SPLIT_QF_GAE}.csv'
+    )
+    n = min(len(left), len(right), int(rollout_steps))
+    weights = [f'q_{i}' for i in range(6)]
+    weights += [f'r_{i}' for i in range(2)]
+    weights += [f'qf_{i}' for i in range(6)]
+    if n < 1 or any(col not in left or col not in right for col in weights):
+        raise RuntimeError('Missing GAE vs one-step Qf pairing data')
+    max_weight = float(np.max(np.abs(
+        left.loc[:n-1, weights].to_numpy(float)
+        - right.loc[:n-1, weights].to_numpy(float)
+    )))
+    max_cte = float(np.max(np.abs(
+        left['cte_m'].to_numpy(float)[:n]
+        - right['cte_m'].to_numpy(float)[:n]
+    )))
+    if max_weight > 1e-8 or max_cte > 1e-8:
+        raise RuntimeError(
+            f'GAE and one-step Qf arms not paired at {scenario}: '
+            f'weight={max_weight}, cte={max_cte}'
+        )
+    return {
+        'scenario': scenario,
+        'pre_update_steps': n,
+        'baseline': SPLIT_QF_POLICY_GRADIENT,
+        'candidate': SPLIT_QF_GAE,
+        'max_abs_weight_difference': max_weight,
+        'max_abs_cte_difference_m': max_cte,
+        'matched_weight_prefix': True,
+        'matched_cte_prefix': True,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--checkpoint', type=Path, required=True)
@@ -1129,6 +1180,12 @@ def main():
                     help='Phase 2B: add paired stochastic Qf_psi sampled-frozen '
                          'and reward-driven policy-gradient terminal-head arms. '
                          'Requires --split-critic and --ablation-components.')
+    ap.add_argument('--split-qf-gae', action='store_true',
+                    help='Phase 2C: add GAE(lambda) Qf_psi learning arm, '
+                         'paired with unchanged one-step Qf PG. Requires '
+                         '--split-qf-policy-gradient.')
+    ap.add_argument('--qfpg-gae-lambda', type=float, default=0.95,
+                    help='Phase 2C GAE lambda in [0,1]; 0 is exact one-step TD.')
     ap.add_argument('--qfpg-sigma', type=float, default=0.02,
                     help='Latent-logit Gaussian Qf_psi exploration sigma')
     ap.add_argument('--qfpg-lr', type=float, default=0.0001,
@@ -1166,6 +1223,10 @@ def main():
         ap.error('--split-critic requires --ablation-components')
     if args.split_qf_policy_gradient and not args.split_critic:
         ap.error('--split-qf-policy-gradient requires --split-critic')
+    if args.split_qf_gae and not args.split_qf_policy_gradient:
+        ap.error('--split-qf-gae requires --split-qf-policy-gradient')
+    if not np.isfinite(args.qfpg_gae_lambda) or not 0. <= args.qfpg_gae_lambda <= 1.:
+        ap.error('--qfpg-gae-lambda must be in [0,1]')
     if not np.isfinite(args.qfpg_sigma) or not 0. < args.qfpg_sigma <= 1.:
         ap.error('--qfpg-sigma must be in (0,1]')
     if not np.isfinite(args.qfpg_lr) or not 0. < args.qfpg_lr <= .01:
@@ -1216,6 +1277,7 @@ def main():
         qfpsi_trust_frac=args.qfpsi_trust_frac,
         split_critic=args.split_critic,
         split_qf_pg=args.split_qf_policy_gradient,
+        split_qf_gae=args.split_qf_gae,
     )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
@@ -1291,6 +1353,12 @@ def main():
                 'regularization and hard solver trust. Value trained via '
                 'unchanged TD-Huber; no formal stability guarantee.'
             ),
+            SPLIT_QF_GAE: (
+                'Phase 2C: as Phase 2B one-step PG, but terminal Qf_psi '
+                'advantage uses batch-truncated GAE(lambda) from SAME '
+                'pre-update Value Critic. Actor/TD-Huber and RNG unchanged, '
+                'only terminal head output column learns; no stability proof.'
+            ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -1313,10 +1381,16 @@ def main():
         qfpsi_trust_method='solver_input_only_pretrained_state_dependent',
         qfpsi_trust_is_stability_certificate=False,
         split_critic=bool(args.split_critic),
-        split_critic_stage=('Phase_2B_stochastic_score_function'
+        split_critic_stage=('Phase_2C_truncated_GAE'
+                            if args.split_qf_gae else
+                            'Phase_2B_stochastic_score_function'
                             if args.split_qf_policy_gradient
                             else 'Phase_2A_value_TD_qf_frozen'),
         split_qf_policy_gradient=bool(args.split_qf_policy_gradient),
+        split_qf_gae=bool(args.split_qf_gae),
+        qfpg_gae_lambda=args.qfpg_gae_lambda,
+        qfpg_gae_one_step_comparator_lambda=0.0,
+        qfpg_gae_batch_boundary='bootstrap_last_nonterminal_transition',
         qfpg_sigma=args.qfpg_sigma,
         qfpg_lr=args.qfpg_lr,
         qfpg_trust_frac=args.qfpg_trust_frac,
@@ -1378,6 +1452,7 @@ def main():
     results = []
     sampled_pairing = []
     phase2b_pairing_rows = []
+    phase2c_pairing_rows = []
 
     for scenario in scenarios:
         for controller in controllers:
@@ -1420,7 +1495,8 @@ def main():
                     env, fresh_agent(args, meta), args, scenario,
                     controller_label=controller, split_critic=True,
                 )
-            elif controller in (SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT):
+            elif controller in (SPLIT_QF_SAMPLED_FROZEN, SPLIT_QF_POLICY_GRADIENT,
+                                SPLIT_QF_GAE):
                 m = run_ac_nmpc_online(
                     env, fresh_agent(args, meta), args, scenario,
                     controller_label=controller, split_critic=True,
@@ -1444,6 +1520,13 @@ def main():
             ))
             pd.DataFrame(phase2b_pairing_rows).to_csv(
                 args.output / 'phase2b_sampled_pairing.csv', index=False,
+            )
+        if args.split_qf_gae:
+            phase2c_pairing_rows.append(phase2c_initial_pairing(
+                args.output, scenario['name'], args.rollout_steps,
+            ))
+            pd.DataFrame(phase2c_pairing_rows).to_csv(
+                args.output / 'phase2c_advantage_pairing.csv', index=False,
             )
 
     comparison = pd.DataFrame(results)
