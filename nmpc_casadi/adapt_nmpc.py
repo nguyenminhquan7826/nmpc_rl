@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rl_nmpc as rl
+from cad_eval_reference import prepare_cad_evaluation_reference
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -41,13 +42,46 @@ TRAINING_REF_SOURCE = Path(rl.b.REF_SOURCE)
 TRAINING_LENGTH_M = float(rl.b.CAD_S_END)
 
 
-def install_evaluation_track(output, track):
+def install_evaluation_track(output, track, track_csv=None):
     """Switch only the running evaluator's ReferenceManager source.
 
     No changes to rl_nmpc.py, baseline.py, training trajectory or checkpoint.
     Every controller re-instantiates the same reference via Environment.reset.
     """
-    if track == 'training':
+    if track_csv is not None:
+        # An evaluator must not relabel a training reference as held-out.
+        # Neither training CSV is modified.
+        custom_source = Path(track_csv).expanduser().resolve(strict=True)
+        training_candidates = [
+            rl.b.BASE / 'xref_states_smoothed.csv',
+            rl.b.BASE / 'xref_states_controller.csv',
+        ]
+        for candidate in training_candidates:
+            if candidate.exists() and (
+                custom_source == candidate.resolve()
+                or sha256_file(custom_source) == sha256_file(candidate)
+            ):
+                raise ValueError(
+                    'Refusing to evaluate a training CAD source with --track-csv: '
+                    + str(candidate)
+                )
+        ref_info, info = prepare_cad_evaluation_reference(
+            custom_source, Path(output), rl.b.TAIL_LENGTH_M,
+            min_speed_mps=float(rl.b.cfg['vx_min']),
+            max_speed_mps=min(float(rl.b.TEST_SPEED_MPS),
+                              float(rl.b.cfg['vx_max'])),
+            wheelbase_m=float(rl.b.WHEELBASE_M),
+            steering_limit_rad=float(min(
+                abs(rl.b.cfg['u_min'][1]), abs(rl.b.cfg['u_max'][1]))),
+        )
+        rl.b.TAIL_FILE = Path(info['tail_file'])
+        rl.b.REF_INFO = ref_info
+        rl.b.CAD_S_END = float(ref_info['cad_s_end'])
+        info['note'] = (
+            'Independent user-supplied CAD reference for evaluation only. '
+            'Training and checkpoint sources remain unchanged.'
+        )
+    elif track == 'training':
         # Explicit legacy replay. Not an out-of-distribution generalization test.
         info = {
             'id': 'training_original',
@@ -734,10 +768,15 @@ def main():
     ap.add_argument('--critic-lr', type=float, default=.001)
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--seed', type=int, default=0)
-    ap.add_argument(
+    track_selection = ap.add_mutually_exclusive_group()
+    track_selection.add_argument(
         '--track', choices=['heldout_s_bend', 'training'],
         default='heldout_s_bend',
         help='Default: unseen S-bend; training is an explicit legacy replay only',
+    )
+    track_selection.add_argument(
+        '--track-csv', type=Path,
+        help='Evaluate with a NEW AutoCAD XREF CSV; training references are protected',
     )
     ap.add_argument('--nominal-only', action='store_true')
     ap.add_argument('--include-frozen-deterministic', action='store_true',
@@ -790,14 +829,14 @@ def main():
     if any(args.output.iterdir()):
         ap.error('Use an empty output folder to preserve prior results')
 
-    reference_metadata = install_evaluation_track(args.output, args.track)
+    reference_metadata = install_evaluation_track(args.output, args.track, args.track_csv)
     controllers = active_controllers(args.include_frozen_deterministic)
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
     config = dict(
         mode='fixed_vs_frozen_vs_online_actor_critic_nmpc',
-        evaluation_track=args.track,
+        evaluation_track=reference_metadata['id'],
         evaluation_reference=reference_metadata,
         evaluation_path_is_held_out=bool(reference_metadata['held_out']),
         checkpoint_source=str(args.checkpoint),
@@ -833,6 +872,7 @@ def main():
             'online_rollout_steps': args.rollout_steps,
             'same_reference_geometry_per_controller': True,
             'heldout_path_not_seen_in_training': bool(reference_metadata['held_out']),
+            'independent_evaluation_reference_from_file': args.track_csv is not None,
         },
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
