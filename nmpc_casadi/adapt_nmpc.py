@@ -11,11 +11,23 @@ import pandas as pd
 import rl_nmpc as rl
 
 
-CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_online')
+CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online')
+FROZEN_DETERMINISTIC = 'ac_nmpc_frozen_deterministic'
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
+    'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
+    'ac_nmpc_frozen_deterministic': 'Frozen AC-NMPC (mean)',
     'ac_nmpc_online': 'Online AC-NMPC',
 }
+
+
+def active_controllers(include_frozen_deterministic=False):
+    """Keep the sampled Frozen vs Online control pair in every experiment."""
+    if include_frozen_deterministic:
+        return ('fixed_nmpc', 'ac_nmpc_frozen',
+                FROZEN_DETERMINISTIC, 'ac_nmpc_online')
+    return CONTROLLERS
+
 
 
 def fresh_agent(args, meta):
@@ -388,6 +400,103 @@ def run_ac_nmpc_online(env, agent, args, scenario):
         controller='ac_nmpc_online',
         updates=len(updates),
         **_timing_metrics(logs, wall_ms, learn_call_times),
+    )
+    return m
+
+
+def snapshot_network_state(agent):
+    """Exact parameters and Adam moments/step counters; RNG intentionally excluded."""
+    return {
+        name: {
+            'p': [arr.copy() for arr in getattr(agent, name).p],
+            'm': [arr.copy() for arr in getattr(agent, name).m],
+            'v': [arr.copy() for arr in getattr(agent, name).v],
+            't': getattr(agent, name).t,
+        }
+        for name in ('actor', 'critic')
+    }
+
+
+def network_state_unchanged(agent, saved):
+    """Frozen means that both policy parameters and optimizer states are unchanged."""
+    for name in ('actor', 'critic'):
+        net = getattr(agent, name)
+        old = saved[name]
+        if net.t != old['t']:
+            return False
+        for attr in ('p', 'm', 'v'):
+            arrays, previous = getattr(net, attr), old[attr]
+            if len(arrays) != len(previous):
+                return False
+            if any(not np.array_equal(x, y) for x, y in zip(arrays, previous)):
+                return False
+    return True
+
+
+def run_ac_nmpc_frozen(env, agent, args, scenario, deterministic=False):
+    """Run the same AC-NMPC feedback policy without a single network update.
+
+    Stochastic Frozen samples from agent.propose(s, explore=True), exactly as
+    Online does. Freshly loaded agents use the same RNG state; they draw the
+    same Gaussian noise per time step until their trajectories/weights diverge.
+    Deterministic Frozen (optional) uses explore=False.
+    """
+    name = scenario['name']
+    ey = float(scenario['ey'])
+    heading = float(scenario['heading'])
+    profile = scenario['profile']
+    label = FROZEN_DETERMINISTIC if deterministic else 'ac_nmpc_frozen'
+
+    saved = snapshot_network_state(agent)
+    propose_timing = []
+    step_timing = []
+    wall_start = time.perf_counter_ns()
+    s, _ = env.reset(ey, heading, rl.b.p_nominal.copy())
+    env.learning_updates = []
+    while True:
+        start = time.perf_counter_ns()
+        weights, _ = agent.propose(s, explore=not deterministic)
+        propose_timing.append((time.perf_counter_ns() - start) / 1e6)
+
+        # Same time-varying physical plant and nominal NMPC predictor as Online.
+        t_plant = float(env.k * rl.b.Ts)
+        p_plant = plant_for_profile(profile, t_plant, args)
+        env.plant = p_plant.copy()
+
+        start = time.perf_counter_ns()
+        sn, _, _, done, _ = env.step(weights)
+        step_timing.append((time.perf_counter_ns() - start) / 1e6)
+        _attach_plant_to_last_log(env, profile, p_plant)
+        s = sn
+        if done:
+            break
+    wall_ms = (time.perf_counter_ns() - wall_start) / 1e6
+
+    # Never call agent.learn, including at episode end. Assert all parameters
+    # AND optimizer states are bitwise unchanged.
+    if getattr(env, 'learning_updates', []):
+        raise RuntimeError(f'Frozen run unexpectedly updated networks: {name}')
+    if not network_state_unchanged(agent, saved):
+        raise RuntimeError(f'Frozen Actor/Critic or Adam state changed: {name}')
+
+    logs = pd.DataFrame(env.logs)
+    n = len(logs)
+    if len(propose_timing) != n or len(step_timing) != n:
+        raise RuntimeError(
+            f'Timing alignment failed for {name}/{label}: '
+            f'logs={n}, propose={len(propose_timing)}, step={len(step_timing)}'
+        )
+    logs['env_step_wall_ms'] = np.asarray(step_timing, dtype=float)
+    logs['updates_before_action'] = 0
+    logs = _finalize_timing(logs, propose_timing=propose_timing)
+    logs.to_csv(args.output / f'{name}_{label}.csv', index=False)
+
+    m = rl.metrics(env.logs)
+    m.update(
+        scenario=name, plant_profile=profile, controller=label, updates=0,
+        frozen_network_unchanged=True,
+        sampling_mode='deterministic_mean' if deterministic else 'sampled_gaussian',
+        **_timing_metrics(logs, wall_ms, []),
     )
     return m
 
