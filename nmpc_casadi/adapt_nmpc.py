@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import rl_nmpc as rl
 from cad_eval_reference import prepare_cad_evaluation_reference
+from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -19,20 +20,30 @@ from heldout_reference import (
 
 CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online')
 FROZEN_DETERMINISTIC = 'ac_nmpc_frozen_deterministic'
+ABLATION_MODES = {'ac_nmpc_actor_only': 'actor', 'ac_nmpc_critic_only': 'critic'}
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
     'ac_nmpc_frozen_deterministic': 'Frozen AC-NMPC (mean)',
     'ac_nmpc_online': 'Online AC-NMPC',
+    'ac_nmpc_actor_only': 'Online Actor-only',
+    'ac_nmpc_critic_only': 'Online Critic-only',
 }
 
 
-def active_controllers(include_frozen_deterministic=False):
-    """Keep the sampled Frozen vs Online control pair in every experiment."""
+def active_controllers(include_frozen_deterministic=False, include_ablation=False):
+    """Default controller roster is unchanged unless ablation is explicit."""
+    if not include_ablation:
+        if include_frozen_deterministic:
+            return ('fixed_nmpc', 'ac_nmpc_frozen',
+                    FROZEN_DETERMINISTIC, 'ac_nmpc_online')
+        return CONTROLLERS
+    order = ['fixed_nmpc', 'ac_nmpc_frozen']
     if include_frozen_deterministic:
-        return ('fixed_nmpc', 'ac_nmpc_frozen',
-                FROZEN_DETERMINISTIC, 'ac_nmpc_online')
-    return CONTROLLERS
+        order.append(FROZEN_DETERMINISTIC)
+    order.extend(ABLATION_MODES)
+    order.append('ac_nmpc_online')
+    return tuple(order)
 
 
 
@@ -408,8 +419,17 @@ def run_fixed_nmpc(env, args, scenario):
     return m
 
 
-def run_ac_nmpc_online(env, agent, args, scenario):
-    """Pretrained Actor-Critic inference + online Actor/Critic network updates."""
+def run_ac_nmpc_online(env, agent, args, scenario, *,
+                       train_component='both', controller_label='ac_nmpc_online'):
+    """Sampled AC-NMPC with both or only one network updated."""
+    if train_component not in ('both', 'actor', 'critic'):
+        raise ValueError('Unknown online ablation mode')
+    expected = ('ac_nmpc_online' if train_component == 'both'
+                else next(k for k, v in ABLATION_MODES.items() if v == train_component))
+    if controller_label != expected:
+        raise ValueError('Controller label/mode mismatch')
+    initial_actor = snapshot_net(agent.actor)
+    initial_critic = snapshot_net(agent.critic)
     name = scenario['name']
     ey = float(scenario['ey'])
     heading = float(scenario['heading'])
@@ -425,7 +445,9 @@ def run_ac_nmpc_online(env, agent, args, scenario):
 
     def timed_learn(rows):
         start = time.perf_counter_ns()
-        result = original_learn(rows)
+        result = learn_selected_component(
+            agent, rows, train_component, learn_fn=original_learn,
+        )
         elapsed = (time.perf_counter_ns() - start) / 1e6
         learn_call_times.append(elapsed)
         return {**result, 'learn_ms': elapsed}
@@ -492,15 +514,37 @@ def run_ac_nmpc_online(env, agent, args, scenario):
         logs.loc[k:, 'updates_before_action'] += 1
 
     logs = _finalize_timing(logs, propose_timing=propose_timing, learn_timing_by_step=learn_by_step)
-    logs.to_csv(args.output / f'{name}_ac_nmpc_online.csv', index=False)
+    logs.to_csv(args.output / f'{name}_{controller_label}.csv', index=False)
 
-    pd.DataFrame(updates).to_csv(args.output / f'{name}_ac_updates.csv', index=False)
-    agent.save(args.output / f'{name}_ac_adapted_checkpoint.npz')
+    # Preserve legacy output filenames for the original Online condition.
+    if train_component == 'both':
+        update_name = f'{name}_ac_updates.csv'
+        checkpoint_name = f'{name}_ac_adapted_checkpoint.npz'
+    else:
+        update_name = f'{name}_{controller_label}_updates.csv'
+        checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
+    pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
+    agent.save(args.output / checkpoint_name)
+    unchanged_actor = net_unchanged(agent.actor, initial_actor)
+    unchanged_critic = net_unchanged(agent.critic, initial_critic)
+    if train_component == 'actor' and not unchanged_critic:
+        raise RuntimeError('Actor-only changed pretrained Critic parameters or Adam state')
+    if train_component == 'critic' and not unchanged_actor:
+        raise RuntimeError('Critic-only changed pretrained Actor parameters or Adam state')
 
     m.update(
         scenario=name,
         plant_profile=profile,
-        controller='ac_nmpc_online',
+        controller=controller_label,
+        train_component=train_component,
+        actor_unchanged_from_checkpoint=unchanged_actor,
+        critic_unchanged_from_checkpoint=unchanged_critic,
+        actor_parameter_change_norm=net_parameter_change_norm(
+            agent.actor, initial_actor,
+        ),
+        critic_parameter_change_norm=net_parameter_change_norm(
+            agent.critic, initial_critic,
+        ),
         updates=len(updates),
         **_timing_metrics(logs, wall_ms, learn_call_times),
     )
@@ -690,6 +734,10 @@ def build_pairwise_long(comparison):
         ('online_vs_frozen', 'ac_nmpc_online', 'ac_nmpc_frozen'),
         ('online_vs_fixed', 'ac_nmpc_online', 'fixed_nmpc'),
         ('frozen_mean_vs_sampled', FROZEN_DETERMINISTIC, 'ac_nmpc_frozen'),
+        ('actor_only_vs_frozen', 'ac_nmpc_actor_only', 'ac_nmpc_frozen'),
+        ('critic_only_vs_frozen', 'ac_nmpc_critic_only', 'ac_nmpc_frozen'),
+        ('both_vs_actor_only', 'ac_nmpc_online', 'ac_nmpc_actor_only'),
+        ('both_vs_critic_only', 'ac_nmpc_online', 'ac_nmpc_critic_only'),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -781,6 +829,8 @@ def main():
     ap.add_argument('--nominal-only', action='store_true')
     ap.add_argument('--include-frozen-deterministic', action='store_true',
                     help='Also evaluate frozen Actor mean without Gaussian exploration')
+    ap.add_argument('--ablation-components', action='store_true',
+                    help='Add Actor-only and Critic-only Online control arms')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -830,7 +880,8 @@ def main():
         ap.error('Use an empty output folder to preserve prior results')
 
     reference_metadata = install_evaluation_track(args.output, args.track, args.track_csv)
-    controllers = active_controllers(args.include_frozen_deterministic)
+    controllers = active_controllers(args.include_frozen_deterministic,
+                                     include_ablation=args.ablation_components)
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
@@ -859,6 +910,14 @@ def main():
                 'Same pretrained checkpoint and Gaussian sampling as stochastic Frozen. '
                 'Actor/Critic infer Q/R/Qf per step and both networks update online through agent.learn().'
             ),
+            'ac_nmpc_actor_only': (
+                'Only Actor updates Q/R; Critic/Qf network and Adam state stay frozen. '
+                'Both gradients are still computed: timing is diagnostic only.'
+            ),
+            'ac_nmpc_critic_only': (
+                'Only Critic updates Qf/value; Actor/Q/R network and Adam state stay frozen. '
+                'Both gradients are still computed: timing is diagnostic only.'
+            ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -874,6 +933,7 @@ def main():
             'heldout_path_not_seen_in_training': bool(reference_metadata['held_out']),
             'independent_evaluation_reference_from_file': args.track_csv is not None,
         },
+        ablation_components=bool(args.ablation_components),
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -936,6 +996,12 @@ def main():
             elif controller == 'ac_nmpc_online':
                 m = run_ac_nmpc_online(
                     env, fresh_agent(args, meta), args, scenario
+                )
+            elif controller in ABLATION_MODES:
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario,
+                    train_component=ABLATION_MODES[controller],
+                    controller_label=controller,
                 )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
