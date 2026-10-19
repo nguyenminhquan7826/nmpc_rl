@@ -174,6 +174,12 @@ def fresh_agent(args, meta):
         )
     agent = rl.Agent(**kw)
     agent.load(args.checkpoint)
+    # Agent.load restores the checkpoint's RNG state, overriding --seed.
+    # New opt-in evaluation seed varies Gaussian exploration without changing
+    # pretrained weights/Adam moments. Every control arm gets the SAME seed.
+    sampling_seed = getattr(args, 'sampling_seed', None)
+    if sampling_seed is not None:
+        agent.rng = np.random.default_rng(sampling_seed)
     if getattr(agent, 'train_component', 'both') != 'both':
         raise ValueError(
             'This comparison requires an Actor-Critic checkpoint with train_component="both". '
@@ -865,7 +871,11 @@ def main():
     ap.add_argument('--actor-lr', type=float, default=.003)
     ap.add_argument('--critic-lr', type=float, default=.001)
     ap.add_argument('--seconds', type=float, default=120)
-    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--seed', type=int, default=0,
+                    help='Legacy Agent constructor seed; checkpoint load restores RNG')
+    ap.add_argument('--sampling-seed', type=int, default=None,
+                    help='Optional independent Gaussian exploration seed AFTER checkpoint load; '
+                         'omit to reproduce legacy experiments exactly')
     track_selection = ap.add_mutually_exclusive_group()
     track_selection.add_argument(
         '--track', choices=['heldout_s_bend', 'training'],
@@ -905,6 +915,8 @@ def main():
 
     if args.rollout_steps < 1 or args.seconds <= 0 or not np.isfinite(args.seconds):
         ap.error('rollout-steps and seconds must be positive')
+    if args.sampling_seed is not None and args.sampling_seed < 0:
+        ap.error('--sampling-seed must be a non-negative integer')
     if args.isolate_qfpsi and not args.ablation_components:
         ap.error('--isolate-qfpsi requires --ablation-components')
     for lr in [args.actor_lr, args.critic_lr]:
@@ -994,6 +1006,7 @@ def main():
             'same_nmpc_internal_model': 'b.p_nominal',
             'checkpoint_reset_for_each_ac_scenario_and_controller': True,
             'frozen_online_same_sampled_rng_initial_state': True,
+            'same_sampling_seed_for_every_actor_critic_arm': True,
             'frozen_online_same_explore_true': True,
             'frozen_has_zero_learning_updates': True,
             'online_rollout_steps': args.rollout_steps,
@@ -1008,6 +1021,12 @@ def main():
         critic_lr=args.critic_lr,
         seconds=args.seconds,
         seed=args.seed,
+        sampling_seed=args.sampling_seed,
+        gaussian_sampling_rng_policy=(
+            'explicit_independent_seed_after_checkpoint_load'
+            if args.sampling_seed is not None
+            else 'checkpoint_restored_rng_state'
+        ),
         Ts_s=float(rl.b.Ts),
         control_deadline_ms=float(rl.b.Ts * 1000.0),
         scenario_set=args.scenario_set,
