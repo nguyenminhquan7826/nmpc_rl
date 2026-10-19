@@ -501,56 +501,122 @@ def run_ac_nmpc_frozen(env, agent, args, scenario, deterministic=False):
     return m
 
 
+def _improve_lower(baseline, candidate, metric):
+    """Positive improvement percentage means candidate is better."""
+    bv = float(baseline[metric])
+    cv = float(candidate[metric])
+    if not np.isfinite(bv) or not np.isfinite(cv) or abs(bv) < 1e-12:
+        return np.nan
+    return 100.0 * (bv - cv) / abs(bv)
+
+
 def build_pairwise_summary(comparison):
-    """One row per scenario; positive tracking improvement means AC-NMPC is better."""
+    """One row per scenario, retaining historical Fixed-vs-Online columns."""
     rows = []
-    for scenario, d in comparison.groupby('scenario'):
-        idx = d.set_index('controller')
+    for scenario, group in comparison.groupby('scenario', sort=False):
+        idx = group.set_index('controller')
         if not set(CONTROLLERS).issubset(idx.index):
             continue
-        f = idx.loc['fixed_nmpc']
-        a = idx.loc['ac_nmpc_online']
-
-        def improve_lower(metric):
-            fv, av = float(f[metric]), float(a[metric])
-            if not np.isfinite(fv) or not np.isfinite(av) or abs(fv) < 1e-12:
-                return np.nan
-            return 100.0 * (fv - av) / abs(fv)
-
+        f, z, a = [idx.loc[name] for name in CONTROLLERS]
         rows.append({
             'scenario': scenario,
             'plant_profile': f['plant_profile'],
             'fixed_tracking_feasible': bool(f['tracking_feasible']),
+            'frozen_tracking_feasible': bool(z['tracking_feasible']),
             'ac_tracking_feasible': bool(a['tracking_feasible']),
             'fixed_mean_cte_post_m': float(f['mean_cte_post_m']),
+            'frozen_mean_cte_post_m': float(z['mean_cte_post_m']),
             'ac_mean_cte_post_m': float(a['mean_cte_post_m']),
-            'mean_cte_post_improvement_pct': improve_lower('mean_cte_post_m'),
+            'mean_cte_post_improvement_pct': _improve_lower(f, a, 'mean_cte_post_m'),
+            'frozen_vs_fixed_mean_cte_improvement_pct':
+                _improve_lower(f, z, 'mean_cte_post_m'),
+            'online_vs_frozen_mean_cte_improvement_pct':
+                _improve_lower(z, a, 'mean_cte_post_m'),
             'fixed_max_cte_post_m': float(f['max_cte_post_m']),
+            'frozen_max_cte_post_m': float(z['max_cte_post_m']),
             'ac_max_cte_post_m': float(a['max_cte_post_m']),
-            'max_cte_post_improvement_pct': improve_lower('max_cte_post_m'),
+            'max_cte_post_improvement_pct': _improve_lower(f, a, 'max_cte_post_m'),
+            'online_vs_frozen_max_cte_improvement_pct':
+                _improve_lower(z, a, 'max_cte_post_m'),
             'fixed_heading_rmse_post_rad': float(f['rmse_heading_post_rad']),
+            'frozen_heading_rmse_post_rad': float(z['rmse_heading_post_rad']),
             'ac_heading_rmse_post_rad': float(a['rmse_heading_post_rad']),
-            'heading_rmse_post_improvement_pct': improve_lower('rmse_heading_post_rad'),
+            'heading_rmse_post_improvement_pct':
+                _improve_lower(f, a, 'rmse_heading_post_rad'),
+            'online_vs_frozen_heading_rmse_improvement_pct':
+                _improve_lower(z, a, 'rmse_heading_post_rad'),
             'fixed_vx_rmse_post_mps': float(f['rmse_vx_post_mps']),
+            'frozen_vx_rmse_post_mps': float(z['rmse_vx_post_mps']),
             'ac_vx_rmse_post_mps': float(a['rmse_vx_post_mps']),
-            'vx_rmse_post_improvement_pct': improve_lower('rmse_vx_post_mps'),
+            'vx_rmse_post_improvement_pct': _improve_lower(f, a, 'rmse_vx_post_mps'),
+            'online_vs_frozen_vx_rmse_improvement_pct':
+                _improve_lower(z, a, 'rmse_vx_post_mps'),
             'fixed_solver_success_pct': float(f['solver_success_pct']),
+            'frozen_solver_success_pct': float(z['solver_success_pct']),
             'ac_solver_success_pct': float(a['solver_success_pct']),
-            'solver_success_delta_pctpoint': float(a['solver_success_pct'] - f['solver_success_pct']),
+            'solver_success_delta_pctpoint': float(
+                a['solver_success_pct'] - f['solver_success_pct']),
             'fixed_completion_pct': float(f['completion_pct']),
+            'frozen_completion_pct': float(z['completion_pct']),
             'ac_completion_pct': float(a['completion_pct']),
-            'completion_delta_pctpoint': float(a['completion_pct'] - f['completion_pct']),
+            'completion_delta_pctpoint': float(
+                a['completion_pct'] - f['completion_pct']),
             'fixed_return': float(f['return']),
+            'frozen_return': float(z['return']),
             'ac_return': float(a['return']),
             'return_delta': float(a['return'] - f['return']),
+            'online_vs_frozen_return_delta': float(a['return'] - z['return']),
             'fixed_control_step_mean_ms': float(f['control_step_total_mean_ms']),
+            'frozen_control_step_mean_ms': float(z['control_step_total_mean_ms']),
             'ac_control_step_mean_ms': float(a['control_step_total_mean_ms']),
             'ac_timing_overhead_mean_ms': float(
-                a['control_step_total_mean_ms'] - f['control_step_total_mean_ms']
-            ),
+                a['control_step_total_mean_ms'] - f['control_step_total_mean_ms']),
+            'online_vs_frozen_timing_overhead_mean_ms': float(
+                a['control_step_total_mean_ms'] - z['control_step_total_mean_ms']),
             'fixed_control_step_p99_ms': float(f['control_step_total_p99_ms']),
+            'frozen_control_step_p99_ms': float(z['control_step_total_p99_ms']),
             'ac_control_step_p99_ms': float(a['control_step_total_p99_ms']),
         })
+    return pd.DataFrame(rows)
+
+
+def build_pairwise_long(comparison):
+    """Explicit pairwise contrasts including the frozen-learning effect."""
+    pairs = (
+        ('frozen_vs_fixed', 'ac_nmpc_frozen', 'fixed_nmpc'),
+        ('online_vs_frozen', 'ac_nmpc_online', 'ac_nmpc_frozen'),
+        ('online_vs_fixed', 'ac_nmpc_online', 'fixed_nmpc'),
+        ('frozen_mean_vs_sampled', FROZEN_DETERMINISTIC, 'ac_nmpc_frozen'),
+    )
+    rows = []
+    for scenario, group in comparison.groupby('scenario', sort=False):
+        idx = group.set_index('controller')
+        for name, candidate, baseline in pairs:
+            if candidate not in idx.index or baseline not in idx.index:
+                continue
+            a, b = idx.loc[candidate], idx.loc[baseline]
+            entry = {
+                'scenario': scenario,
+                'comparison': name,
+                'candidate': candidate,
+                'baseline': baseline,
+                'candidate_updates': int(a['updates']),
+                'baseline_updates': int(b['updates']),
+                'candidate_reached_end': bool(a['reached_end']),
+                'baseline_reached_end': bool(b['reached_end']),
+                'candidate_tracking_feasible': bool(a['tracking_feasible']),
+                'baseline_tracking_feasible': bool(b['tracking_feasible']),
+            }
+            for metric in ('mean_cte_post_m', 'max_cte_post_m',
+                           'rmse_heading_post_rad', 'rmse_vx_post_mps',
+                           'mean_du_delta_sq'):
+                entry[metric + '_improvement_pct'] = _improve_lower(b, a, metric)
+                entry[metric + '_delta'] = float(a[metric] - b[metric])
+            entry['return_delta'] = float(a['return'] - b['return'])
+            entry['completion_pct_delta'] = float(a['completion_pct'] - b['completion_pct'])
+            entry['control_step_mean_ms_delta'] = float(
+                a['control_step_total_mean_ms'] - b['control_step_total_mean_ms'])
+            rows.append(entry)
     return pd.DataFrame(rows)
 
 
