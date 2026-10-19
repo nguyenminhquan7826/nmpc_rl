@@ -9,6 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rl_nmpc as rl
+from heldout_reference import (
+    HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
+    compare_geometry, describe_geometry,
+    generate_heldout_s_bend, sha256_file,
+)
 
 
 CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online')
@@ -28,6 +33,70 @@ def active_controllers(include_frozen_deterministic=False):
                 FROZEN_DETERMINISTIC, 'ac_nmpc_online')
     return CONTROLLERS
 
+
+
+# Capture immutable training-reference identity BEFORE the evaluation-only path
+# is installed. Never alter the original source CSV or pretrained checkpoint.
+TRAINING_REF_SOURCE = Path(rl.b.REF_SOURCE)
+TRAINING_LENGTH_M = float(rl.b.CAD_S_END)
+
+
+def install_evaluation_track(output, track):
+    """Switch only the running evaluator's ReferenceManager source.
+
+    No changes to rl_nmpc.py, baseline.py, training trajectory or checkpoint.
+    Every controller re-instantiates the same reference via Environment.reset.
+    """
+    if track == 'training':
+        # Explicit legacy replay. Not an out-of-distribution generalization test.
+        info = {
+            'id': 'training_original',
+            'held_out': False,
+            'reference_file': str(TRAINING_REF_SOURCE),
+            'reference_sha256': sha256_file(TRAINING_REF_SOURCE),
+            'reference_length_m': float(rl.b.CAD_S_END),
+            'note': 'Legacy in-distribution replay, NOT evidence of unseen-path generalization',
+        }
+    elif track == 'heldout_s_bend':
+        path = Path(output) / f'{HELDOUT_ID}_reference.csv'
+        tail_path = Path(output) / f'{HELDOUT_ID}_with_virtual_tail.csv'
+        data = generate_heldout_s_bend(
+            path, length_m=TRAINING_LENGTH_M,
+            speed_mps=rl.b.TEST_SPEED_MPS,
+        )
+        diff = compare_geometry(TRAINING_REF_SOURCE, data)
+        # Baseline generates a virtual horizon-only tail and records the REAL
+        # path length separately. Only these runtime b.* values are switched.
+        ref_info = rl.b.prepare_reference_with_tail(
+            path, tail_path, rl.b.TAIL_LENGTH_M
+        )
+        rl.b.TAIL_FILE = tail_path
+        rl.b.REF_INFO = ref_info
+        rl.b.CAD_S_END = float(ref_info['cad_s_end'])
+        if not np.isclose(rl.b.CAD_S_END, TRAINING_LENGTH_M, atol=1e-8):
+            raise RuntimeError('Heldout geometry changed the task path length')
+        info = {
+            'id': HELDOUT_ID,
+            'held_out': True,
+            'not_used_for_training_or_checkpoint_selection': True,
+            'source_geometry': 'independent analytic curvature integration',
+            'curvature_formula': HELDOUT_CURVATURE_FORMULA,
+            'reference_file': str(path),
+            'reference_sha256': sha256_file(path),
+            'tail_file': str(tail_path),
+            'tail_sha256': sha256_file(tail_path),
+            'geometry': describe_geometry(data),
+            'difference_vs_training': diff,
+        }
+    else:
+        raise ValueError(f'Unknown evaluation track: {track}')
+    info['training_reference_file'] = str(TRAINING_REF_SOURCE)
+    info['training_reference_sha256'] = sha256_file(TRAINING_REF_SOURCE)
+    info['training_reference_length_m'] = TRAINING_LENGTH_M
+    (Path(output) / 'reference_manifest.json').write_text(
+        json.dumps(info, indent=2, ensure_ascii=False), encoding='utf-8'
+    )
+    return info
 
 
 def fresh_agent(args, meta):
@@ -665,6 +734,11 @@ def main():
     ap.add_argument('--critic-lr', type=float, default=.001)
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument(
+        '--track', choices=['heldout_s_bend', 'training'],
+        default='heldout_s_bend',
+        help='Default: unseen S-bend; training is an explicit legacy replay only',
+    )
     ap.add_argument('--nominal-only', action='store_true')
     ap.add_argument('--include-frozen-deterministic', action='store_true',
                     help='Also evaluate frozen Actor mean without Gaussian exploration')
@@ -716,12 +790,16 @@ def main():
     if any(args.output.iterdir()):
         ap.error('Use an empty output folder to preserve prior results')
 
+    reference_metadata = install_evaluation_track(args.output, args.track)
     controllers = active_controllers(args.include_frozen_deterministic)
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
     config = dict(
         mode='fixed_vs_frozen_vs_online_actor_critic_nmpc',
+        evaluation_track=args.track,
+        evaluation_reference=reference_metadata,
+        evaluation_path_is_held_out=bool(reference_metadata['held_out']),
         checkpoint_source=str(args.checkpoint),
         checkpoint_metadata=meta,
         controllers=list(controllers),
@@ -753,6 +831,8 @@ def main():
             'frozen_online_same_explore_true': True,
             'frozen_has_zero_learning_updates': True,
             'online_rollout_steps': args.rollout_steps,
+            'same_reference_geometry_per_controller': True,
+            'heldout_path_not_seen_in_training': bool(reference_metadata['held_out']),
         },
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
@@ -819,6 +899,7 @@ def main():
                 )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
+            m['reference_track'] = reference_metadata['id']
             results.append(m)
             pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
             print(json.dumps(m), flush=True)
