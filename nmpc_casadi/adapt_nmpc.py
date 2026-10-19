@@ -1017,6 +1017,75 @@ def main():
         )
 
     comparison = pd.DataFrame(results)
+    if args.ablation_components:
+        # Pair ALL Online arms against the same sampled Frozen prefix. Before
+        # step 16 no gradient was applied, so first actions/weights/CTE
+        # must match exactly under common checkpoint/seed and plant.
+        pairing_rows = []
+        qfpsi_rows = []
+        targets = ['ac_nmpc_frozen', 'ac_nmpc_actor_only',
+                   'ac_nmpc_critic_only', 'ac_nmpc_online']
+        for scenario in scenarios:
+            name = scenario['name']
+            frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
+            weight_cols = [col for col in frozen.columns
+                           if col.startswith(('q_', 'r_', 'qf_'))]
+            for controller in targets:
+                d = pd.read_csv(args.output / f'{name}_{controller}.csv')
+                measured = d.loc[d['progress_m'] >= 1.3]
+                if measured.empty:
+                    measured = d
+                match_row = comparison.loc[
+                    (comparison.scenario == name) &
+                    (comparison.controller == controller)
+                ].iloc[0]
+                qfpsi_rows.append({
+                    'scenario': name, 'controller': controller,
+                    'updates': int(match_row['updates']),
+                    'mean_cte_post_cm': 100.0 * float(match_row['mean_cte_post_m']),
+                    'max_cte_post_cm': 100.0 * float(match_row['max_cte_post_m']),
+                    'heading_rmse_post_rad': float(match_row['rmse_heading_post_rad']),
+                    'return': float(match_row['return']),
+                    'qf_psi_mean_post': float(measured['qf_2'].mean()),
+                    'qf_psi_first': float(d['qf_2'].iloc[0]),
+                    'qf_psi_last': float(d['qf_2'].iloc[-1]),
+                    'qf_psi_max_post': float(measured['qf_2'].max()),
+                    'q_psi_mean_post': float(measured['q_2'].mean()),
+                    'r_delta_mean_post': float(measured['r_1'].mean()),
+                })
+                if controller == 'ac_nmpc_frozen':
+                    continue
+                n = min(len(d), len(frozen), args.rollout_steps)
+                common_cols = [v for v in weight_cols if v in d.columns]
+                if n < 1 or len(common_cols) != 14:
+                    raise RuntimeError('Missing complete 14-weight ablation pairing log')
+                wdelta = float(np.max(np.abs(
+                    d[common_cols].to_numpy(float)[:n] -
+                    frozen[common_cols].to_numpy(float)[:n]
+                )))
+                cdelta = float(np.max(np.abs(
+                    d['cte_m'].to_numpy(float)[:n] -
+                    frozen['cte_m'].to_numpy(float)[:n]
+                )))
+                pairing_rows.append({
+                    'scenario': name, 'controller': controller,
+                    'pre_update_steps': n,
+                    'max_abs_weight_difference': wdelta,
+                    'max_abs_cte_difference_m': cdelta,
+                    'matched_weight_prefix': wdelta <= 1e-8,
+                    'matched_cte_prefix': cdelta <= 1e-8,
+                })
+                if wdelta > 1e-8 or cdelta > 1e-8:
+                    raise RuntimeError(
+                        f'Unfair sampled prefix: scenario={name}, '
+                        f'controller={controller}, weight={wdelta}, cte={cdelta}'
+                    )
+        pd.DataFrame(qfpsi_rows).to_csv(
+            args.output / 'ablation_qfpsi_summary.csv', index=False,
+        )
+        pd.DataFrame(pairing_rows).to_csv(
+            args.output / 'ablation_sampled_pairing.csv', index=False,
+        )
     pairwise = build_pairwise_summary(comparison)
     pairwise.to_csv(args.output / 'pairwise_comparison.csv', index=False)
     build_pairwise_long(comparison).to_csv(
