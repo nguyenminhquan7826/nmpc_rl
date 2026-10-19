@@ -29,10 +29,49 @@ from split_critic_eval import SplitValueTerminalPolicy
 PSI = 2
 
 
+def generalized_advantage(reward, values, next_values, terminated,
+                          *, gamma=rl.GAMMA, gae_lambda=0.0):
+    """Truncated-batch GAE with stopped Value Critic targets.
+
+    delta_t = r_t + gamma*(1-terminal_t)*V(s_{t+1}) - V(s_t)
+    A_t = delta_t + gamma*lambda*(1-terminal_t)*A_{t+1}
+
+    At the end of the available batch, A beyond the batch is zero;
+    the *last* delta still includes V(s_{t+1}) when nonterminal, so
+    16-step batch truncation bootstraps without treating time-limit
+    truncation as a catastrophic terminal. When lambda=0, identical
+    one-step TD estimator is used. No differentiation through V or NMPC.
+    """
+    if not (np.isfinite(gamma) and 0.0 <= gamma <= 1.0):
+        raise ValueError('gamma must be finite in [0,1]')
+    if not (np.isfinite(gae_lambda) and 0.0 <= gae_lambda <= 1.0):
+        raise ValueError('GAE lambda must be finite in [0,1]')
+    r = np.asarray(reward, dtype=float)
+    v = np.asarray(values, dtype=float)
+    vn = np.asarray(next_values, dtype=float)
+    term = np.asarray(terminated, dtype=float)
+    if (r.ndim != 1 or not len(r) or r.shape != v.shape
+            or r.shape != vn.shape or r.shape != term.shape):
+        raise ValueError('GAE inputs must be equal non-empty one-dimensional arrays')
+    if (not all(np.all(np.isfinite(x)) for x in (r, v, vn, term))
+            or np.any((term != 0.0) & (term != 1.0))):
+        raise ValueError('GAE inputs must be finite; terminated must be binary')
+    delta = r + gamma * (1.0 - term) * vn - v
+    adv = np.empty_like(delta)
+    follow = 0.0
+    for i in range(len(delta)-1, -1, -1):
+        follow = delta[i] + gamma * gae_lambda * (1.0 - term[i]) * follow
+        adv[i] = follow
+    return adv, delta
+
+
 class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
     def __init__(self, agent, *, qf_seed, sigma, lr, trust_frac,
-                 trust_reg, terminal_learning):
+                 trust_reg, terminal_learning, gae_lambda=0.0):
         super().__init__(agent)
+        self.gae_lambda = float(gae_lambda)
+        if not np.isfinite(self.gae_lambda) or not (0.0 <= self.gae_lambda <= 1.0):
+            raise ValueError('GAE lambda must be finite in [0,1]')
         self.sigma = float(sigma)
         self.lr = float(lr)
         self.trust_frac = float(trust_frac)
@@ -115,7 +154,7 @@ class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
         return (q, r, applied), actor_z
 
     def update_terminal(self, rows):
-        """Update terminal head using independent one-step reward estimator.
+        """Update terminal head using selected one-step TD or GAE estimator.
 
         Must run BEFORE Agent.learn(rows) so both networks use the same
         pre-update Value Critic for bootstrapping. The final reward in each
@@ -137,12 +176,16 @@ class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
         if not np.allclose(mu, stored_mu, rtol=1e-12, atol=1e-12):
             raise RuntimeError('Terminal head changed within an unprocessed batch')
 
-        # Stop gradient at Value Critic. This uses the same reward, terminal
-        # masking, and one-step TD signal as the existing Actor advantage.
+        # Stop gradient at Value Critic. Actor and TD-Huber optimization
+        # remain unchanged; GAE only changes terminal-head advantage.
+        # At lambda=0 this reproduces the Phase 2B TD advantage exactly.
         v = np.asarray(self.agent.value(s, e), dtype=float)
         next_v = np.asarray(self.agent.value(sn, en), dtype=float)
-        td = (reward + rl.GAMMA * (1. - terminated) * next_v - v)
-        normalized_adv = td / max(float(np.std(td)), 1.)
+        advantages, td = generalized_advantage(
+            reward, v, next_v, terminated,
+            gamma=rl.GAMMA, gae_lambda=self.gae_lambda,
+        )
+        normalized_adv = advantages / max(float(np.std(advantages)), 1.)
 
         log_prob = (-.5 * ((samples - mu) / self.sigma)**2
                     - np.log(self.sigma) - .5 * np.log(2. * np.pi))
@@ -189,6 +232,11 @@ class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
             'qfpg_trust_log_loss': reg_loss,
             'qfpg_control_td_mean': float(np.mean(td)),
             'qfpg_control_td_rms': float(np.sqrt(np.mean(td**2))),
+            'qfpg_gae_lambda': self.gae_lambda,
+            'qfpg_advantage_mean': float(np.mean(advantages)),
+            'qfpg_advantage_std': float(np.std(advantages)),
+            'qfpg_advantage_rms': float(np.sqrt(np.mean(advantages**2))),
+            'qfpg_advantage_max_abs': float(np.max(np.abs(advantages))),
             'qfpg_sampled_logit_sigma': self.sigma,
             'qfpg_trust_reg': self.trust_reg,
             'qfpg_grad_norm': float(grad_stats['grad_norm']),
