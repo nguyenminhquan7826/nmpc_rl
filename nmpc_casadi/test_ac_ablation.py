@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 
 import rl_nmpc as rl
+import adapt_nmpc as adapt
 from ac_ablation import (
     learn_selected_component, net_parameter_change_norm,
     net_unchanged, snapshot_net,
@@ -24,6 +25,24 @@ def synthetic_rollout_rows():
 
 
 class ActorCriticAblationTests(unittest.TestCase):
+    def test_selection_adds_arms_without_changing_default(self):
+        self.assertEqual(
+            adapt.active_controllers(),
+            ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online'),
+        )
+        self.assertEqual(
+            adapt.active_controllers(include_ablation=True),
+            ('fixed_nmpc', 'ac_nmpc_frozen',
+             'ac_nmpc_actor_only', 'ac_nmpc_critic_only',
+             'ac_nmpc_online'),
+        )
+        self.assertIn(
+            'ac_nmpc_frozen_deterministic',
+            adapt.active_controllers(
+                include_frozen_deterministic=True, include_ablation=True,
+            ),
+        )
+
     def test_actor_only_fixes_critic_parameters_and_adam(self):
         a = rl.Agent(seed=8, actor_lr=.001, critic_lr=.001)
         actor_before, critic_before = snapshot_net(a.actor), snapshot_net(a.critic)
