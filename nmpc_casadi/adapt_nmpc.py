@@ -630,6 +630,8 @@ def main():
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--nominal-only', action='store_true')
+    ap.add_argument('--include-frozen-deterministic', action='store_true',
+                    help='Also evaluate frozen Actor mean without Gaussian exploration')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -678,22 +680,31 @@ def main():
     if any(args.output.iterdir()):
         ap.error('Use an empty output folder to preserve prior results')
 
+    controllers = active_controllers(args.include_frozen_deterministic)
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
     config = dict(
-        mode='fixed_nmpc_vs_online_actor_critic_nmpc',
+        mode='fixed_vs_frozen_vs_online_actor_critic_nmpc',
         checkpoint_source=str(args.checkpoint),
         checkpoint_metadata=meta,
-        controllers=list(CONTROLLERS),
+        controllers=list(controllers),
         comparison_definition={
             'fixed_nmpc': (
                 'Pure NMPC baseline. Q/R/Qf = Environment.initial_weights for every sample. '
                 'No Actor, no Critic, no neural-network inference, no online learning.'
             ),
+            'ac_nmpc_frozen': (
+                'Same pretrained checkpoint as Online, same per-step Gaussian sampling and '
+                'state-dependent Q/R/Qf, but Actor/Critic and Adam optimizer are never updated.'
+            ),
+            'ac_nmpc_frozen_deterministic': (
+                'Optional frozen inference using Actor mean, without Gaussian sampling and '
+                'without any gradient/network update.'
+            ),
             'ac_nmpc_online': (
-                'Pretrained Actor-Critic checkpoint. Actor/Critic infer state-dependent Q/R/Qf '
-                'every sample and both networks are updated online through agent.learn().'
+                'Same pretrained checkpoint and Gaussian sampling as stochastic Frozen. '
+                'Actor/Critic infer Q/R/Qf per step and both networks update online through agent.learn().'
             ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
@@ -701,7 +712,11 @@ def main():
             'same_initial_condition_per_scenario': True,
             'same_time_varying_plant_profile': True,
             'same_nmpc_internal_model': 'b.p_nominal',
-            'checkpoint_reset_for_each_ac_scenario': True,
+            'checkpoint_reset_for_each_ac_scenario_and_controller': True,
+            'frozen_online_same_sampled_rng_initial_state': True,
+            'frozen_online_same_explore_true': True,
+            'frozen_has_zero_learning_updates': True,
+            'online_rollout_steps': args.rollout_steps,
         },
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
@@ -713,7 +728,7 @@ def main():
         scenario_set=args.scenario_set,
         plant_parameter_order=['m', 'Iz', 'Cf', 'Cr', 'lf', 'lr', 'mu_roll', 'g', 'eps_v'],
         plant_mismatch={
-            'controller_model': 'Both controllers keep NMPC model b.p_nominal.',
+            'controller_model': 'All controllers keep NMPC model b.p_nominal.',
             'payload': {
                 'start_s': args.payload_start,
                 'ramp_s': args.payload_ramp_s,
@@ -735,9 +750,13 @@ def main():
             },
         },
         timing_note=(
-            'Fixed NMPC has policy_inference_ms=0 and learn_ms=0. AC-NMPC includes policy inference '
-            'and online learning. Environment.step wall time includes simulated plant propagation, '
-            'so timing is simulation-process timing rather than pure embedded WCET.'
+            'Fixed NMPC has policy_inference_ms=0 and learn_ms=0. '
+            'Frozen AC-NMPC has state-dependent inference, but learn_ms=0. '
+            'Online AC-NMPC has both inference and learning. '
+            'Environment.step wall time includes simulated plant propagation; '
+            'these are Python simulation-process timings rather than embedded WCET. '
+            'For sampled Frozen vs Online, common Gaussian draws are seeded identically; '
+            'their observations/policies diverge only after online updates.'
         ),
     )
     (args.output / 'config.json').write_text(json.dumps(config, indent=2))
@@ -746,22 +765,33 @@ def main():
     results = []
 
     for scenario in scenarios:
-        # Case 1: pure fixed-weight NMPC.  It does not load/use the Actor-Critic at runtime.
-        m_fixed = run_fixed_nmpc(env, args, scenario)
-        results.append(m_fixed)
-        pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
-        print(json.dumps(m_fixed), flush=True)
-
-        # Case 2: reset to exactly the same pretrained checkpoint for this scenario,
-        # then keep updating Actor and Critic online during the run.
-        m_ac = run_ac_nmpc_online(env, fresh_agent(args, meta), args, scenario)
-        results.append(m_ac)
-        pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
-        print(json.dumps(m_ac), flush=True)
+        for controller in controllers:
+            if controller == 'fixed_nmpc':
+                m = run_fixed_nmpc(env, args, scenario)
+            elif controller == 'ac_nmpc_frozen':
+                m = run_ac_nmpc_frozen(
+                    env, fresh_agent(args, meta), args, scenario, deterministic=False
+                )
+            elif controller == FROZEN_DETERMINISTIC:
+                m = run_ac_nmpc_frozen(
+                    env, fresh_agent(args, meta), args, scenario, deterministic=True
+                )
+            elif controller == 'ac_nmpc_online':
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario
+                )
+            else:
+                raise ValueError(f'Unknown controller: {controller}')
+            results.append(m)
+            pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
+            print(json.dumps(m), flush=True)
 
     comparison = pd.DataFrame(results)
     pairwise = build_pairwise_summary(comparison)
     pairwise.to_csv(args.output / 'pairwise_comparison.csv', index=False)
+    build_pairwise_long(comparison).to_csv(
+        args.output / 'pairwise_learning_effect.csv', index=False
+    )
 
     timing_cols = [
         c for c in comparison.columns
