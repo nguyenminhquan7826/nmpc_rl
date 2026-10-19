@@ -1619,6 +1619,48 @@ def main():
 
     comparison = pd.DataFrame(results)
     if args.qfpsi_signed_sweep:
+        # Zero signed offset must reproduce Phase 2A over the ENTIRE
+        # simulated route, not merely at the first action/prefix.
+        zero_parity = []
+        for scenario in scenarios:
+            name = scenario['name']
+            zero = pd.read_csv(
+                args.output / f'{name}_ac_nmpc_split_qfpsi_p00.csv'
+            )
+            phase2a = pd.read_csv(
+                args.output / f'{name}_{SPLIT_CRITIC_FROZEN_TERMINAL}.csv'
+            )
+            weight_cols = [f'q_{i}' for i in range(6)]
+            weight_cols += [f'r_{i}' for i in range(2)]
+            weight_cols += [f'qf_{i}' for i in range(6)]
+            same_steps = len(zero) == len(phase2a)
+            if not same_steps:
+                raise RuntimeError('Signed 0% and Phase 2A rollout length differ')
+            weight_diff = float(np.max(np.abs(
+                zero[weight_cols].to_numpy(float) -
+                phase2a[weight_cols].to_numpy(float)
+            )))
+            cte_diff = float(np.max(np.abs(
+                zero['cte_m'].to_numpy(float) -
+                phase2a['cte_m'].to_numpy(float)
+            )))
+            zero_parity.append({
+                'scenario': name,
+                'n_steps': len(zero),
+                'max_abs_weight_diff': weight_diff,
+                'max_abs_cte_diff_m': cte_diff,
+                'matched_full_weights': bool(weight_diff <= 1e-8),
+                'matched_full_cte': bool(cte_diff <= 1e-8),
+            })
+            if weight_diff > 1e-8 or cte_diff > 1e-8:
+                raise RuntimeError(
+                    f'Signed zero intervention differs from exact Phase 2A '
+                    f'at {name}: weight_diff={weight_diff}, cte_diff={cte_diff}'
+                )
+        pd.DataFrame(zero_parity).to_csv(
+            args.output / 'signed_qfpsi_zero_parity.csv',
+            index=False,
+        )
         signed_summary = []
         for scenario_name, group in comparison.groupby('scenario', sort=False):
             idx = group.set_index('controller')
