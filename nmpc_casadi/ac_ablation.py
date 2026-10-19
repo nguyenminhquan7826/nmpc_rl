@@ -88,9 +88,14 @@ def learn_selected_component(agent, rows, mode='both', learn_fn=None):
         raise RuntimeError(
             f'Ablation violated inactive {inactive} weights or Adam state'
         )
-    return {
-        **result,
-        'train_component': mode,
-        'actor_update_applied': mode == 'actor',
-        'critic_update_applied': mode == 'critic',
-    }
+    # rl_nmpc.rollout averages EVERY Agent.learn() return field with
+    # np.average(...). Keep the exact original numeric diagnostics schema;
+    # storing a string (e.g. 'train_component') here crashes that aggregator.
+    # The mode and inactive-network assertions are logged by adapt_nmpc.py.
+    if any(
+        not np.isscalar(value) or
+        not isinstance(value, (int, float, np.integer, np.floating, np.bool_))
+        for value in result.values()
+    ):
+        raise TypeError('Agent.learn must return numeric scalar diagnostics')
+    return result
