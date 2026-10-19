@@ -35,7 +35,7 @@ class SplitCriticArchitectureTests(unittest.TestCase):
         h = split_pretrained_terminal_head(a.critic)
         split_raw, _ = h.forward(state)
         self.assertEqual(split_raw.shape, (9, 6))
-        np.testing.assert_array_equal(split_raw, original_raw[:, :6])
+        np.testing.assert_allclose(split_raw, original_raw[:, :6], rtol=1e-13, atol=1e-12)
         self.assertEqual(len(h.p), len(a.critic.p))
         self.assertEqual(h.p[-2].shape[1], 6)
         self.assertEqual(h.p[-1].shape, (6,))
@@ -60,8 +60,10 @@ class SplitCriticArchitectureTests(unittest.TestCase):
             w_old, z_old = legacy.propose(s, True)
             w_new, z_new = split.propose(s, True)
             np.testing.assert_array_equal(z_old, z_new)
-            for a, b in zip(w_old, w_new):
-                np.testing.assert_array_equal(a, b)
+            np.testing.assert_array_equal(w_old[0], w_new[0])
+            np.testing.assert_array_equal(w_old[1], w_new[1])
+            # Six-vs-seven-output BLAS matmul can differ at roundoff.
+            np.testing.assert_allclose(w_old[2], w_new[2], rtol=1e-13, atol=1e-10)
         self.assertTrue(split.terminal_unchanged())
 
     def test_td_critic_learns_but_terminal_network_is_isolated(self):
