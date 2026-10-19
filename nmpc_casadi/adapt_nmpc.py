@@ -809,7 +809,7 @@ def main():
 
     import matplotlib.pyplot as plt
 
-    # Trajectory: only the two controllers that matter for the thesis comparison.
+    # Same trajectory panel: fixed, frozen sampled, online (+ optional frozen mean).
     for scenario in scenarios:
         name = scenario['name']
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -817,13 +817,13 @@ def main():
             rl.b.REF_INFO['cad_X'], rl.b.REF_INFO['cad_Y'],
             'k--', linewidth=2, label='Reference',
         )
-        for controller in CONTROLLERS:
+        for controller in controllers:
             d = pd.read_csv(args.output / f'{name}_{controller}.csv')
             line, = ax.plot(d.X, d.Y, linewidth=1.6, label=DISPLAY[controller])
             color = line.get_color()
             ax.scatter(d.X.iloc[0], d.Y.iloc[0], color=color, marker='o', s=30)
             ax.scatter(d.X.iloc[-1], d.Y.iloc[-1], color=color, marker='x', s=60)
-        ax.set(xlabel='X [m]', ylabel='Y [m]', title=f'{name}: Fixed NMPC vs Online AC-NMPC')
+        ax.set(xlabel='X [m]', ylabel='Y [m]', title=f'{name}: Fixed / Frozen / Online AC-NMPC')
         ax.set_aspect('equal', adjustable='box')
         ax.grid(alpha=.3)
         ax.legend()
@@ -833,7 +833,7 @@ def main():
 
     # Nominal tracking comparison.
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    for controller in CONTROLLERS:
+    for controller in controllers:
         d = pd.read_csv(args.output / f'nominal_{controller}.csv')
         axes[0].plot(d.t_s, d.cte_m * 100.0, label=DISPLAY[controller])
         axes[1].plot(d.t_s, np.rad2deg(d.e_psi), label=DISPLAY[controller])
@@ -881,18 +881,18 @@ def main():
                 changed.append(label)
         axes[0].axhline(1.0, linestyle='--', linewidth=1.0)
         axes[0].set_ylabel('Plant / nominal')
-        axes[0].set_title(f'{name}: same plant mismatch, Fixed NMPC vs Online AC-NMPC')
+        axes[0].set_title(f'{name}: same plant mismatch, Fixed / Frozen / Online AC-NMPC')
         if changed:
             axes[0].legend(ncol=len(changed))
 
-        for controller in CONTROLLERS:
+        for controller in controllers:
             d = pd.read_csv(args.output / f'{name}_{controller}.csv')
             axes[1].plot(d.t_s, d.cte_m * 100.0, label=DISPLAY[controller])
             axes[2].plot(d.t_s, np.rad2deg(d.e_psi), label=DISPLAY[controller])
         axes[1].set_ylabel('CTE [cm]')
         axes[2].set_ylabel('Heading error [deg]')
-        axes[1].legend(ncol=2)
-        axes[2].legend(ncol=2)
+        axes[1].legend(ncol=min(len(controllers), 4))
+        axes[2].legend(ncol=min(len(controllers), 4))
 
         qbase, rbase, fbase = rl.Q_BASE, rl.R_BASE, rl.F_BASE
         if 'q_4' in ac:
@@ -917,7 +917,7 @@ def main():
 
     # Direct computational-cost comparison.
     fig, ax = plt.subplots(figsize=(11, 5))
-    for controller in CONTROLLERS:
+    for controller in controllers:
         d = pd.read_csv(args.output / f'nominal_{controller}.csv')
         ax.plot(d.t_s, d.control_step_total_ms, linewidth=1.0, label=DISPLAY[controller])
     ax.axhline(
@@ -926,38 +926,58 @@ def main():
     )
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('Processing time / step [ms]')
-    ax.set_title('Nominal computational cost: Fixed NMPC vs Online AC-NMPC')
+    ax.set_title('Nominal computational cost: Fixed / Frozen / Online AC-NMPC')
     ax.grid(alpha=.25)
     ax.legend()
     fig.tight_layout()
     fig.savefig(args.output / 'timing_fixed_vs_ac.png', dpi=170)
     plt.close(fig)
 
-    # Compact metric comparison figure.
+    # Compact comparison across all control modes (rather than only fixed/online).
     if not pairwise.empty:
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8))
-        x = np.arange(len(pairwise))
-        width = 0.36
-        axes[0].bar(x - width / 2, pairwise.fixed_mean_cte_post_m * 100.0,
-                    width, label='Fixed NMPC')
-        axes[0].bar(x + width / 2, pairwise.ac_mean_cte_post_m * 100.0,
-                    width, label='Online AC-NMPC')
-        axes[0].set_ylabel('Mean post CTE [cm]')
-        axes[0].set_xticks(x, pairwise.scenario, rotation=20)
-        axes[0].grid(axis='y', alpha=.25)
-        axes[0].legend()
-
-        axes[1].bar(x - width / 2, pairwise.fixed_max_cte_post_m * 100.0,
-                    width, label='Fixed NMPC')
-        axes[1].bar(x + width / 2, pairwise.ac_max_cte_post_m * 100.0,
-                    width, label='Online AC-NMPC')
-        axes[1].set_ylabel('Max post CTE [cm]')
-        axes[1].set_xticks(x, pairwise.scenario, rotation=20)
-        axes[1].grid(axis='y', alpha=.25)
-        axes[1].legend()
+        fig, axes = plt.subplots(2, 1, figsize=(11, 8))
+        names = pairwise['scenario'].tolist()
+        x = np.arange(len(names))
+        width = 0.78 / len(controllers)
+        for j, controller in enumerate(controllers):
+            group = comparison.loc[comparison.controller == controller].set_index('scenario')
+            group = group.reindex(names)
+            offset = (j - (len(controllers)-1)/2.0)*width
+            axes[0].bar(x+offset, group['mean_cte_post_m'].to_numpy(float)*100.0,
+                        width, label=DISPLAY[controller])
+            axes[1].bar(x+offset, group['max_cte_post_m'].to_numpy(float)*100.0,
+                        width, label=DISPLAY[controller])
+        for ax, ylabel in zip(axes, ['Mean post CTE [cm]', 'Max post CTE [cm]']):
+            ax.set_ylabel(ylabel)
+            ax.set_xticks(x, names, rotation=20)
+            ax.grid(axis='y', alpha=.25)
+            ax.legend(ncol=2)
         fig.tight_layout()
         fig.savefig(args.output / 'tracking_metric_comparison.png', dpi=170)
         plt.close(fig)
+
+    # Direct nominal parameter-multiplier comparison: Frozen vs Online.
+    frozen = pd.read_csv(args.output / 'nominal_ac_nmpc_frozen.csv')
+    online = pd.read_csv(args.output / 'nominal_ac_nmpc_online.csv')
+    fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+    for ax, col, nominal, title in zip(
+        axes,
+        ('q_4', 'q_2', 'r_1', 'qf_5'),
+        (rl.Q_BASE[4], rl.Q_BASE[2], rl.R_BASE[1], rl.F_BASE[5]),
+        ('Actor alpha_pos', 'Actor alpha_psi',
+         'Actor beta_delta', 'Critic Qf_Y multiplier')
+    ):
+        ax.plot(frozen.t_s, frozen[col]/nominal,
+                label=DISPLAY['ac_nmpc_frozen'])
+        ax.plot(online.t_s, online[col]/nominal,
+                label=DISPLAY['ac_nmpc_online'])
+        ax.set_ylabel(title)
+        ax.legend()
+        ax.grid(alpha=.25)
+    axes[-1].set_xlabel('Time [s]')
+    fig.tight_layout()
+    fig.savefig(args.output / 'nominal_frozen_vs_online_multipliers.png', dpi=170)
+    plt.close(fig)
 
 
 if __name__ == '__main__':
