@@ -60,7 +60,7 @@ def _noop_adam_update(grads, lr):
     }
 
 
-def learn_selected_component(agent, rows, mode='both'):
+def learn_selected_component(agent, rows, mode='both', learn_fn=None):
     """Use the original Agent.learn() with one network's Adam step disabled.
 
     'both' calls Agent.learn with no wrapping and must reproduce legacy Online
@@ -70,8 +70,9 @@ def learn_selected_component(agent, rows, mode='both'):
     """
     if mode not in MODES:
         raise ValueError(f'Unknown Actor/Critic ablation mode: {mode!r}')
+    original_learn = agent.learn if learn_fn is None else learn_fn
     if mode == 'both':
-        return agent.learn(rows)
+        return original_learn(rows)
 
     inactive = 'critic' if mode == 'actor' else 'actor'
     net = getattr(agent, inactive)
@@ -79,7 +80,7 @@ def learn_selected_component(agent, rows, mode='both'):
     original_update = net.update
     try:
         net.update = _noop_adam_update
-        result = agent.learn(rows)
+        result = original_learn(rows)
     finally:
         net.update = original_update
 
