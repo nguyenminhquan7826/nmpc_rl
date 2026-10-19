@@ -620,6 +620,42 @@ def build_pairwise_long(comparison):
     return pd.DataFrame(rows)
 
 
+def initial_sampled_pairing(output, scenario, rollout_steps):
+    """Check common action prefix before the first Online network update.
+
+    Both modes load the same checkpoint, use Gaussian sampling, and see the
+    same plant. Initial actions should agree until online's first batch update.
+    Report mismatches rather than silently assuming paired samples.
+    """
+    f = pd.read_csv(Path(output)/f'{scenario}_ac_nmpc_frozen.csv')
+    a = pd.read_csv(Path(output)/f'{scenario}_ac_nmpc_online.csv')
+    n = min(len(f), len(a), int(rollout_steps))
+    columns = [c for c in f.columns if c.startswith(('q_', 'r_', 'qf_'))
+               and c in a.columns]
+    if n == 0 or not columns:
+        raise RuntimeError(f'No comparable Frozen/Online weights in {scenario}')
+    fw = f.loc[:n-1, columns].to_numpy(float)
+    aw = a.loc[:n-1, columns].to_numpy(float)
+    max_weight_difference = float(np.max(np.abs(fw - aw)))
+    max_cte_difference = float(np.max(np.abs(
+        f['cte_m'].to_numpy(float)[:n] -
+        a['cte_m'].to_numpy(float)[:n]
+    )))
+    return {
+        'scenario':scenario,
+        'pre_update_steps':int(n),
+        'weight_columns_compared':len(columns),
+        'max_abs_weight_difference':max_weight_difference,
+        'max_abs_cte_difference_m':max_cte_difference,
+        'matched_weight_prefix':bool(np.allclose(fw, aw, rtol=1e-9, atol=1e-8)),
+        'matched_cte_prefix':bool(np.allclose(
+            f['cte_m'].to_numpy(float)[:n],
+            a['cte_m'].to_numpy(float)[:n],
+            rtol=1e-9, atol=1e-8
+        )),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--checkpoint', type=Path, required=True)
@@ -763,6 +799,7 @@ def main():
 
     scenarios = build_scenarios(args)
     results = []
+    sampled_pairing = []
 
     for scenario in scenarios:
         for controller in controllers:
@@ -785,6 +822,12 @@ def main():
             results.append(m)
             pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
             print(json.dumps(m), flush=True)
+        sampled_pairing.append(
+            initial_sampled_pairing(args.output, scenario['name'], args.rollout_steps)
+        )
+        pd.DataFrame(sampled_pairing).to_csv(
+            args.output / 'initial_sampled_pairing.csv', index=False
+        )
 
     comparison = pd.DataFrame(results)
     pairwise = build_pairwise_summary(comparison)
