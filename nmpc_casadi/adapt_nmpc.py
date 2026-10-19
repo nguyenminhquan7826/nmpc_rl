@@ -1036,6 +1036,56 @@ def initial_sampled_pairing(output, scenario, rollout_steps):
     }
 
 
+def phase2b_initial_pairing(output, scenario, rollout_steps):
+    """Pair TWO stochastic Qf arms before gradient update.
+
+    These modes deliberately differ from Frozen at step 1 due to new
+    terminal exploration; comparing their pre-update prefix to standard
+    Frozen would be an invalid fairness claim. Instead compare them with
+    each other: identical Actor RNG, Qf RNG, plant and checkpoint.
+    """
+    a = pd.read_csv(
+        Path(output) / f'{scenario}_{SPLIT_QF_SAMPLED_FROZEN}.csv'
+    )
+    b = pd.read_csv(
+        Path(output) / f'{scenario}_{SPLIT_QF_POLICY_GRADIENT}.csv'
+    )
+    n = min(len(a), len(b), int(rollout_steps))
+    weights = [f'q_{i}' for i in range(6)]
+    weights += [f'r_{i}' for i in range(2)]
+    weights += [f'qf_{i}' for i in range(6)]
+    if n < 1 or any(x not in a or x not in b for x in weights):
+        raise RuntimeError('Missing stochastic Qf pairing weights')
+    d_weights = float(np.max(np.abs(
+        a.loc[:n-1, weights].to_numpy(float)
+        - b.loc[:n-1, weights].to_numpy(float)
+    )))
+    d_cte = float(np.max(np.abs(
+        a['cte_m'].to_numpy(float)[:n]
+        - b['cte_m'].to_numpy(float)[:n]
+    )))
+    matched = bool(d_weights <= 1e-8 and d_cte <= 1e-8)
+    if not matched:
+        raise RuntimeError(
+            f'Unfair stochastic Qf pre-update sample prefix: '
+            f'{scenario}, max_abs_weight={d_weights}, '
+            f'max_abs_cte={d_cte}'
+        )
+    return {
+        'scenario': scenario,
+        'pre_update_steps': int(n),
+        'sampled_frozen_controller': SPLIT_QF_SAMPLED_FROZEN,
+        'sampled_learned_controller': SPLIT_QF_POLICY_GRADIENT,
+        'max_abs_weight_difference': d_weights,
+        'max_abs_cte_difference_m': d_cte,
+        'matched_weight_prefix': d_weights <= 1e-8,
+        'matched_cte_prefix': d_cte <= 1e-8,
+        'pairing_with_standard_frozen_applicable': False,
+        'note': 'Qf sampled in both arms from step one; '
+                'same initial Actor/Qf samples before first learning update',
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--checkpoint', type=Path, required=True)
@@ -1273,6 +1323,8 @@ def main():
         qfpg_reg=args.qfpg_reg,
         qfpg_rng_policy='separate_numpy_rng_does_not_advance_actor_sampling',
         qfpg_no_formal_stability_guarantee=True,
+        qfpg_original_frozen_preupdate_prefix_applicable=False,
+        qfpg_comparison_control='stochastic_qf_same_seed_no_qf_learning',
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -1325,6 +1377,7 @@ def main():
     scenarios = build_scenarios(args)
     results = []
     sampled_pairing = []
+    phase2b_pairing_rows = []
 
     for scenario in scenarios:
         for controller in controllers:
@@ -1385,6 +1438,13 @@ def main():
         pd.DataFrame(sampled_pairing).to_csv(
             args.output / 'initial_sampled_pairing.csv', index=False
         )
+        if args.split_qf_policy_gradient:
+            phase2b_pairing_rows.append(phase2b_initial_pairing(
+                args.output, scenario['name'], args.rollout_steps,
+            ))
+            pd.DataFrame(phase2b_pairing_rows).to_csv(
+                args.output / 'phase2b_sampled_pairing.csv', index=False,
+            )
 
     comparison = pd.DataFrame(results)
     if args.ablation_components:
