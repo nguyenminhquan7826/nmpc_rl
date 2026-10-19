@@ -1,0 +1,108 @@
+{
+  "td_target": "n_step",
+  "critic_td_loss_kind": "huber",
+  "critic_huber_delta": 50.0,
+  "critic_nsteps": 16,
+  "actor_advantage": "one_step_td",
+  "target_gradient": "stopped",
+  "critic_value": "-b(s)-e^T Qf(s) e, b>=0",
+  "network_hidden_sizes": [
+    32,
+    32,
+    32,
+    32,
+    32
+  ],
+  "network_activation": "tanh",
+  "network_initializer": "xavier_uniform_hidden_zero_output",
+  "actor_regularizer": "log_multiplier_squared",
+  "qf_regularizer": "log_multiplier_squared",
+  "ACTOR_REG": [
+    0.05,
+    0.02,
+    0.01
+  ],
+  "QF_REG": [
+    0.01,
+    0.01,
+    0.01,
+    0.01,
+    0.03,
+    0.03
+  ],
+  "actor_parameter_count": 4739,
+  "critic_parameter_count": 4871,
+  "b_scale": 1.0,
+  "b_init_raw": -4.0,
+  "fixed_terminal_multiplier": 50.0,
+  "actor_lr": 0.003,
+  "critic_lr": 0.005,
+  "rollout_steps": 200,
+  "eval_every": 10,
+  "Ts": 0.071,
+  "N": 10,
+  "seed": 0,
+  "seconds": 120.0,
+  "gamma": 0.99,
+  "sigma_fixed": 0.05,
+  "actor_lower": [
+    0.1,
+    0.1,
+    0.1
+  ],
+  "actor_upper": [
+    20.0,
+    15.0,
+    50.0
+  ],
+  "critic_bounds": [
+    0.5,
+    50.0
+  ],
+  "Q_INIT": [
+    12.0,
+    3.0,
+    50.0,
+    6.0,
+    100.75,
+    100.75
+  ],
+  "R_INIT": [
+    50.0,
+    10.0
+  ],
+  "QF_INIT": [
+    240.0,
+    60.0,
+    1000.0,
+    120.0,
+    2015.0,
+    2015.0
+  ],
+  "Q_EVAL": [
+    20.0,
+    20.0,
+    100.0,
+    20.0,
+    600.0,
+    600.0
+  ],
+  "R_EVAL": [
+    50.0,
+    100.0
+  ],
+  "reward_weights_fixed": true,
+  "reward_scheme": "fixed_eval_progress_failure_v1",
+  "solver_fail_step_cost": 10.0,
+  "fail_terminal_base": 1000.0,
+  "fail_terminal_remaining": 2000.0,
+  "checkpoint_source": null,
+  "evaluation_controllers": [
+    "baseline",
+    "fixed_qf",
+    "actor_fixed_qf",
+    "critic_only",
+    "actor_critic"
+  ],
+  "selection_priority": "feasible, completed with solver >=99%, then tracking or return on nominal validation"
+}
