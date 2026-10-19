@@ -51,6 +51,7 @@ class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
             raise ValueError('qf_seed must be a nonnegative integer')
         self.qf_rng = np.random.default_rng(int(qf_seed))
         self.sample_audit = []
+        self.sample_states = []
         self.pending = []
         self.qf_training_updates = 0
 
@@ -108,9 +109,9 @@ class TerminalPsiScorePolicy(SplitValueTerminalPolicy):
                 candidate_psi, applied_psi, rtol=1e-12, atol=1e-9,
             )),
         })
-        self.pending.append((
-            np.asarray(s, dtype=float).copy(), sample_psi, mu_psi,
-        ))
+        state = np.asarray(s, dtype=float).copy()
+        self.sample_states.append(state)
+        self.pending.append((state, sample_psi, mu_psi))
         return (q, r, applied), actor_z
 
     def update_terminal(self, rows):
