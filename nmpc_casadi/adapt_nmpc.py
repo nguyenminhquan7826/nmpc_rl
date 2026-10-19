@@ -13,6 +13,7 @@ from cad_eval_reference import prepare_cad_evaluation_reference
 from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
 from qfpsi_isolation import install_pretrained_qfpsi_function, verify_frozen_qfpsi
 from qfpsi_trust_region import QfPsiTrustProjector
+from split_critic_eval import SplitValueTerminalPolicy
 from heldout_reference import (
     HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
     compare_geometry, describe_geometry,
@@ -31,6 +32,7 @@ QFPSI_TRUST_MODES = {
     'ac_nmpc_critic_qfpsi_trust': 'critic',
     'ac_nmpc_online_qfpsi_trust': 'both',
 }
+SPLIT_CRITIC_FROZEN_TERMINAL = 'ac_nmpc_split_value_frozen_qf'
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
     'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
@@ -42,16 +44,20 @@ DISPLAY = {
     'ac_nmpc_online_qfpsi_held': 'Online both, Qf_psi held',
     'ac_nmpc_critic_qfpsi_trust': 'Critic-only, Qf_psi trust',
     'ac_nmpc_online_qfpsi_trust': 'Online both, Qf_psi trust',
+    'ac_nmpc_split_value_frozen_qf': 'Split Value+Terminal (Qf head frozen)',
 }
 
 
 def active_controllers(include_frozen_deterministic=False, include_ablation=False,
-                       isolate_qfpsi=False, qfpsi_trust_frac=None):
+                       isolate_qfpsi=False, qfpsi_trust_frac=None,
+                       split_critic=False):
     """Default roster unchanged; optional Qf_psi(s) control interventions."""
     if isolate_qfpsi and not include_ablation:
         raise ValueError('Qf_psi isolation requires --ablation-components')
     if qfpsi_trust_frac is not None and not include_ablation:
         raise ValueError('Qf_psi trust evaluation requires --ablation-components')
+    if split_critic and not include_ablation:
+        raise ValueError('Split Critic evaluation requires --ablation-components')
     if not include_ablation:
         if include_frozen_deterministic:
             return ('fixed_nmpc', 'ac_nmpc_frozen',
@@ -70,6 +76,8 @@ def active_controllers(include_frozen_deterministic=False, include_ablation=Fals
         order.append('ac_nmpc_online_qfpsi_held')
     if qfpsi_trust_frac is not None:
         order.append('ac_nmpc_online_qfpsi_trust')
+    if split_critic:
+        order.append(SPLIT_CRITIC_FROZEN_TERMINAL)
     return tuple(order)
 
 
@@ -454,13 +462,19 @@ def run_fixed_nmpc(env, args, scenario):
 
 def run_ac_nmpc_online(env, agent, args, scenario, *,
                        train_component='both', controller_label='ac_nmpc_online',
-                       hold_qfpsi=False, trust_qfpsi_frac=None):
+                       hold_qfpsi=False, trust_qfpsi_frac=None,
+                       split_critic=False):
     """Sampled AC-NMPC with selective learning and Qf_psi interventions."""
     if train_component not in ('both', 'actor', 'critic'):
         raise ValueError('Unknown online ablation mode')
-    if hold_qfpsi and trust_qfpsi_frac is not None:
-        raise ValueError('Cannot combine gradient-hold and solver-only trust')
-    if hold_qfpsi:
+    if sum((bool(hold_qfpsi), trust_qfpsi_frac is not None,
+            bool(split_critic))) > 1:
+        raise ValueError('Select only one Qf intervention per controller')
+    if split_critic and train_component != 'both':
+        raise ValueError('Split Critic Phase 2A requires Actor+Value updates')
+    if split_critic:
+        expected = SPLIT_CRITIC_FROZEN_TERMINAL
+    elif hold_qfpsi:
         expected = next(
             (key for key, value in QFPSI_HOLD_MODES.items()
              if value == train_component), None,
@@ -488,7 +502,9 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
     profile = scenario['profile']
 
     original_learn = agent.learn
-    original_propose = agent.propose
+    split_policy = SplitValueTerminalPolicy(agent) if split_critic else None
+    original_propose = (split_policy.propose if split_policy is not None
+                        else agent.propose)
     original_step = env.step
 
     # Qf_psi(s) is masked at the FUNCTION level using an immutable pretrained
@@ -612,10 +628,12 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         update_name = f'{name}_{controller_label}_updates.csv'
         checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
     pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
-    # Held/trust arms depend on an immutable pretrained reference Critic.
+    # Held/trust/split arms depend on a separate immutable reference/head.
     # A single Agent checkpoint alone cannot replay these composed policies.
-    if not hold_qfpsi and projector is None:
+    if not hold_qfpsi and projector is None and split_policy is None:
         agent.save(args.output / checkpoint_name)
+    if split_policy is not None and not split_policy.terminal_unchanged():
+        raise RuntimeError('Value Critic TD gradient leaked into terminal Qf network')
     unchanged_actor = net_unchanged(agent.actor, initial_actor)
     unchanged_critic = net_unchanged(agent.critic, initial_critic)
     if train_component == 'actor' and not unchanged_critic:
@@ -630,6 +648,10 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
         train_component=train_component,
         qfpsi_function_held_at_checkpoint=bool(hold_qfpsi),
         qfpsi_solver_only_trust=projector is not None,
+        split_value_terminal_networks=split_policy is not None,
+        split_qf_head_unchanged=(None if split_policy is None
+                                 else split_policy.terminal_unchanged()),
+        split_qf_head_training_enabled=False,
         qfpsi_trust_frac=(None if projector is None else projector.trust_pct),
         qfpsi_trust_projected_pct=(
             None if projector is None else float(
@@ -637,7 +659,9 @@ def run_ac_nmpc_online(env, agent, args, scenario, *,
                                  for a in projection_records])
             )
         ),
-        adapted_checkpoint_saved=not hold_qfpsi and projector is None,
+        adapted_checkpoint_saved=(
+            not hold_qfpsi and projector is None and split_policy is None
+        ),
         actor_unchanged_from_checkpoint=unchanged_actor,
         critic_unchanged_from_checkpoint=unchanged_critic,
         actor_parameter_change_norm=net_parameter_change_norm(
@@ -853,6 +877,12 @@ def build_pairwise_long(comparison):
          'ac_nmpc_online'),
         ('qfpsi_trust_both_vs_frozen', 'ac_nmpc_online_qfpsi_trust',
          'ac_nmpc_frozen'),
+        ('split_value_frozen_qf_vs_frozen', SPLIT_CRITIC_FROZEN_TERMINAL,
+         'ac_nmpc_frozen'),
+        ('split_value_frozen_qf_vs_online', SPLIT_CRITIC_FROZEN_TERMINAL,
+         'ac_nmpc_online'),
+        ('split_value_frozen_qf_vs_trust0', SPLIT_CRITIC_FROZEN_TERMINAL,
+         'ac_nmpc_online_qfpsi_trust'),
     )
     rows = []
     for scenario, group in comparison.groupby('scenario', sort=False):
@@ -957,6 +987,10 @@ def main():
                     help='Evaluation only: keep applied solver Qf_psi(s) within '
                          '(1 +/- frac) of pretrained Critic output; Critic TD '
                          'learning is unchanged. Example 0.10 = +/-10%%.')
+    ap.add_argument('--split-critic', action='store_true',
+                    help='Evaluation only, Phase 2A: clone pretrained Critic into '
+                         'independent Value network (learns TD-Huber) and 6-output '
+                         'Terminal network (frozen). Both Actor/Value update.')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -982,6 +1016,8 @@ def main():
         ap.error('--sampling-seed must be a non-negative integer')
     if args.isolate_qfpsi and not args.ablation_components:
         ap.error('--isolate-qfpsi requires --ablation-components')
+    if args.split_critic and not args.ablation_components:
+        ap.error('--split-critic requires --ablation-components')
     if args.qfpsi_trust_frac is not None:
         if not args.ablation_components:
             ap.error('--qfpsi-trust-frac requires --ablation-components')
@@ -1022,6 +1058,7 @@ def main():
         include_ablation=args.ablation_components,
         isolate_qfpsi=args.isolate_qfpsi,
         qfpsi_trust_frac=args.qfpsi_trust_frac,
+        split_critic=args.split_critic,
     )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
@@ -1079,6 +1116,12 @@ def main():
                 'solver Qf_psi is projected around pretrained Qf_psi(s). '
                 'No standalone adapted checkpoint or stability certificate.'
             ),
+            SPLIT_CRITIC_FROZEN_TERMINAL: (
+                'Phase 2A: original checkpoint Critic split into independent '
+                '7-output TD-Huber Value network and 6-output frozen terminal '
+                'Qf network; Actor and Value update, no TD gradient reaches '
+                'terminal policy. No standalone checkpoint or stability proof.'
+            ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
         fairness={
@@ -1100,6 +1143,8 @@ def main():
         qfpsi_trust_frac=args.qfpsi_trust_frac,
         qfpsi_trust_method='solver_input_only_pretrained_state_dependent',
         qfpsi_trust_is_stability_certificate=False,
+        split_critic=bool(args.split_critic),
+        split_critic_stage='Phase_2A_value_TD_qf_frozen',
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -1189,6 +1234,11 @@ def main():
                     controller_label=controller,
                     trust_qfpsi_frac=args.qfpsi_trust_frac,
                 )
+            elif controller == SPLIT_CRITIC_FROZEN_TERMINAL:
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario,
+                    controller_label=controller, split_critic=True,
+                )
             else:
                 raise ValueError(f'Unknown controller: {controller}')
             m['reference_track'] = reference_metadata['id']
@@ -1215,6 +1265,8 @@ def main():
             targets.extend(QFPSI_HOLD_MODES)
         if args.qfpsi_trust_frac is not None:
             targets.extend(QFPSI_TRUST_MODES)
+        if args.split_critic:
+            targets.append(SPLIT_CRITIC_FROZEN_TERMINAL)
         for scenario in scenarios:
             name = scenario['name']
             frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
