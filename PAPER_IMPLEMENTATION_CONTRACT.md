@@ -168,7 +168,7 @@ rather than per-batch standardization or statistics from TEST.
 For the present 1:10 baseline:
 ```text
   z = [
-     vx/0.10, vy/0.06, wrap(psi)/pi, r/0.50,
+     vx/0.10, vy/0.06, (psi-psi_path_start)/pi, r/0.50,
      (X-X_origin)/L_train, (Y-Y_origin)/L_train,
      e_vx/0.10, e_vy/0.06, wrap(e_psi)/0.20, e_r/0.50,
      e_X/0.10, e_Y/0.10,
@@ -184,10 +184,13 @@ by the earlier project's explicit 12-feature `SCALE` vector
 `[.1,.06,.2,.5,.1,.1,.1,2.,.55,2.,2.,1.]`.
 The 0.1 m/s is the **current controlled experiment** reference speed
 rather than the maximum speed in the original unmodified CAD CSV.
-The physical heading coordinate is wrapped to `(-pi, pi]` then divided
-by `pi`; that representation has a branch-cut discontinuity near
-`±pi`, which must be tracked in diagnostics. Its error coordinate
-uses the existing NMPC heading wrap and 0.20 rad legacy scale.
+The *physical heading feature* uses the continuously tracked/unwrapped
+heading measured **relative to the reference path's initial heading**
+`psi_path_start`, divided by `pi`; do not wrap this absolute heading
+feature or it introduces artificial ±pi branch-cut jumps. The *heading
+error* `e_psi` remains wrapped with the existing NMPC formula and uses
+the 0.20 rad legacy error scale. For long multi-revolution routes, log
+how far the continuous heading feature extends outside [-1,1].
 
 `X_origin,Y_origin`: first point of the run's supplied reference curve,
 not future trajectory values; removes *translation* dependence (but
