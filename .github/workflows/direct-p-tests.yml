@@ -27,3 +27,22 @@ jobs:
       - name: Validate smoke checkpoint and metrics
         working-directory: nmpc_casadi
         run: python -c "import pandas as pd, pathlib; p=pathlib.Path('results_direct_p_ci/smoke'); d=pd.read_csv(p/'training_history.csv'); assert len(d)==2; assert (p/'checkpoint.npz').is_file(); assert d['solver_success_pct'].notna().all()"
+      - name: Validate external training XREF and independent test reference
+        working-directory: nmpc_casadi
+        run: |
+          python - <<'PY'
+          from heldout_reference import generate_heldout_s_bend
+          generate_heldout_s_bend('results_direct_p_ci/custom_train.csv', length_m=8.0)
+          generate_heldout_s_bend('results_direct_p_ci/custom_test.csv', length_m=8.5)
+          PY
+          python train_direct_p.py --mode smoke --seconds 1 --rollout-steps 1 --train-xref results_direct_p_ci/custom_train.csv --output results_direct_p_ci/custom_train_run
+          python eval_direct_p_heldout.py --checkpoint results_direct_p_ci/custom_train_run/checkpoint.npz --track-csv results_direct_p_ci/custom_test.csv --training-reference-manifest results_direct_p_ci/custom_train_run/training_reference_manifest.json --seconds 1 --nominal-only --output results_direct_p_ci/custom_test_run
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          source=json.loads(Path('results_direct_p_ci/custom_train_run/training_reference_manifest.json').read_text())
+          target=json.loads(Path('results_direct_p_ci/custom_test_run/reference_manifest.json').read_text())
+          assert source['role']=='TRAIN_ONLY'
+          assert source['original_source_sha256']!=target['reference_sha256']
+          assert source['reference_sha256']==target['training_reference_sha256']
+          PY
