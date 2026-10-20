@@ -18,12 +18,27 @@ jobs:
       - name: Validate direct quadratic Critic and checkpoint
         working-directory: nmpc_casadi
         run: python -m unittest -v test_direct_p_critic
+      - name: Validate plotted PNGs and offline CSV regeneration
+        working-directory: nmpc_casadi
+        run: python -m unittest -v test_direct_p_plots
       - name: CLI help
         working-directory: nmpc_casadi
         run: python train_direct_p.py --help
       - name: Short CasADi NMPC smoke train (two mini episodes)
         working-directory: nmpc_casadi
         run: python train_direct_p.py --mode smoke --seconds 1 --rollout-steps 1 --output results_direct_p_ci/smoke
+      - name: Assert automatic smoke TRAIN plots
+        working-directory: nmpc_casadi
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          d=Path('results_direct_p_ci/smoke')
+          for name in ['training_return.png',
+                       'training_terminal_weights.png',
+                       'plots/episode_0000_trajectory.png',
+                       'plots/episode_0001_weights_qrqf.png']:
+              assert (d/name).is_file(), name
+          PY
       - name: Validate smoke checkpoint and metrics
         working-directory: nmpc_casadi
         run: python -c "import pandas as pd, pathlib; p=pathlib.Path('results_direct_p_ci/smoke'); d=pd.read_csv(p/'training_history.csv'); assert len(d)==2; assert (p/'checkpoint.npz').is_file(); assert d['solver_success_pct'].notna().all()"
@@ -45,4 +60,8 @@ jobs:
           assert source['role']=='TRAIN_ONLY'
           assert source['original_source_sha256']!=target['reference_sha256']
           assert source['reference_sha256']==target['training_reference_sha256']
+          for name in ['nominal_trajectory.png', 'nominal_fixed_vs_ac_response.png',
+                       'nominal_fixed_vs_ac.png', 'tracking_metric_comparison.png',
+                       'nominal_direct_p_frozen_sampled_weights_qrqf.png']:
+              assert (Path('results_direct_p_ci/custom_test_run')/name).is_file(), name
           PY
