@@ -1,5 +1,0 @@
-scenario,pre_update_steps,weight_columns_compared,max_abs_weight_difference,max_abs_cte_difference_m,matched_weight_prefix,matched_cte_prefix
-nominal,16,14,0.0,0.0,True,True
-payload_ramp,16,14,0.0,0.0,True,True
-tire_segment,16,14,0.0,0.0,True,True
-rolling_segment,16,14,0.0,0.0,True,True
