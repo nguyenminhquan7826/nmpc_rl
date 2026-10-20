@@ -1,13 +1,16 @@
 # Actor–Critic rebuild from the supplied paper — stage 1
 
-This branch deliberately contains only the **source-defined mathematical
-formulas** (`nmpc_casadi/rl_paper_core.py`), equation-level tests, and the
-NMPC-only reference implementation. **Actor and Critic networks are NOT
-created yet** because a key architecture decision (Critic NN versus six
-direct coefficients) is not unambiguously settled by both user materials.
+This branch contains source-defined equations (`rl_paper_core.py`) and a
+**user-approved Direct-P Critic with exactly six directly trainable positive
+terminal parameters** (`direct_p_critic.py`). This Critic is NOT a neural
+network. An NMPC bridge passes the Actor's future stage weights and the
+Critic's six Qf values into the same existing NMPC optimization without
+changing its dynamics or constraints. The **Actor NN and training driver
+are not implemented yet**; we are not inventing undocumented architecture,
+state/action bounds or training hyperparameters.
 See [PAPER_IMPLEMENTATION_CONTRACT.md](PAPER_IMPLEMENTATION_CONTRACT.md).
 
-Use `python -m unittest -v test_rl_paper_core test_nmpc_core`.
+Use `python -m unittest -v test_rl_paper_core test_direct_p_critic test_nmpc_core`.
 The untouched NMPC-only branch is
 `experiment/direct-quadratic-td-critic`.
 
@@ -80,3 +83,16 @@ baseline.py, but they have **nothing to do with Actor–Critic**:
    paper, and verifying with the user.
 4. Numerical results from the old RL experiment are preserved in the backup
    branch; they are not evidence about this newly isolated controller.
+
+## Direct-P Critic and NMPC interface
+
+- `nmpc_casadi/direct_p_critic.py`: six physical Qf coefficients,
+  `V=-e.T P e`, source Eq. (6)-(7) TD(0), projected semi-gradient;
+  the constructor requires explicit initial coefficients and bounds.
+- `nmpc_casadi/critic_nmpc_bridge.py`: packs Actor stage Q[6], R[2]
+  and Critic terminal Qf[6]. The Actor remains unimplemented.
+- `nmpc_casadi/nmpc_casadi.py`: `adaptive_cost_weights=True` accepts
+  all 14 diagonals as solver parameters. Default `False` retains
+  the fixed NMPC behavior and unchanged cost/constraint formulas.
+- `PAPER_IMPLEMENTATION_CONTRACT.md` documents deviations from
+  the document's pages 36–37 and the open scientific decisions.
