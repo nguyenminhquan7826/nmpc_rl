@@ -64,6 +64,9 @@ at this stage. The Critic remains a six-parameter non-NN TD(0) model.
 |---|---|
 | `nmpc_casadi/gaussian_weight_actor.py` | User-approved Actor plus 17-feature fixed physical normalization |
 | `nmpc_casadi/test_gaussian_weight_actor.py` | Independent Gaussian forward/sampling/score-gradient tests |
+| `nmpc_casadi/training_initialization.py` | User-approved learning start: candidate 2; unchanged strong NMPC comparator; exploratory box |
+| `nmpc_casadi/screen_training_weights.py` | TRAIN SHA256-locked empirical screening of representative Q/R/P weight triples |
+| `nmpc_casadi/test_screen_training_weights.py` | Test start/compared weights, candidate bounds, strict TRAIN checksum and failure reporting |
 | `nmpc_casadi/rl_paper_core.py` | Paper reward, TD error, loss and projection equations |
 | `nmpc_casadi/direct_p_critic.py` | Exactly six directly trained positive terminal weights, TD(0) |
 | `nmpc_casadi/critic_nmpc_bridge.py` | Pass Actor Q[6], R[2] and Critic P[6] to parameterized NMPC |
@@ -83,7 +86,7 @@ a second time.
 ```powershell
 git status --short
 git pull --ff-only
-python -m unittest -v test_gaussian_weight_actor test_rl_paper_core test_direct_p_critic test_nmpc_core
+python -m unittest -v test_gaussian_weight_actor test_screen_training_weights test_rl_paper_core test_direct_p_critic test_nmpc_core
 ```
 
 To start from another directory instead, navigate to the existing local
@@ -97,6 +100,27 @@ python run_nmpc.py --seconds 3 --output results_nmpc\paper_rebuild_smoke
 
 Outputs include CSV, config/summary JSON and diagnostic PNGs. As with the
 earlier NMPC-only work, use a fresh output directory for every run.
+
+## Approved learning-start candidate and offline screening
+
+The user approved an initial **deliberately suboptimal but empirically
+feasible** fixed NMPC:
+
+- `Q_start=[12,3,7.5,6,100,100]`,
+  `R_start=[0.6,32]`,
+  `P_start=Qf_start=[96,24,60,48,800,800]`.
+
+The ORIGINAL good fixed NMPC weights are preserved as an independent
+comparator. Two uploaded TRAIN summaries showed the candidate was worse
+on heading and max CTE, but better on speed; this is not a guarantee
+that its common task reward is worse.
+
+See [TRAINING_START_AND_SCREENING.md](TRAINING_START_AND_SCREENING.md)
+for the explicit exploratory bounds, pinned SHA256 of
+`reference_split/train_xref.csv`, Windows PowerShell commands,
+3-case quick and 27-case full empirical screening, numerical limitations
+and training blockers. The TRAIN CSV exists only in the user's local
+working tree, not on GitHub. GitHub CI does not run those TRAIN sweeps.
 
 ## Before full RL training
 
