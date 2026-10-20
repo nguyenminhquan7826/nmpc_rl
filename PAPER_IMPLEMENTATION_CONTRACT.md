@@ -119,3 +119,57 @@ inference from paper Eq. (6). It is a permitted specialization under Remark
   preexisting CasADi NMPC cost uses no such *global* factor. The bridge
   DOES NOT rescale any coefficients or alter the historical baseline.
   The bridge only passes six learned Qf entries into the SAME objective.
+
+## Approved Actor action space — 8 independently adapted diagonal weights
+
+**Decision (explicit user approval, 2026-10-21):** The Actor independently
+adapts ALL six diagonal stage-state penalties and BOTH input-increment
+penalties, in order:
+
+- `Q = diag(q_vx, q_vy, q_psi, q_r, q_X, q_Y)`
+- `R = diag(r_delta_a, r_delta_steer)`
+
+The Actor action/parameter dimension is **8**. Critic is unchanged:
+`Qf = diag(p_vx, p_vy, p_psi, p_r, p_X, p_Y)`, exactly 6 direct
+TD(0)-learned parameters. Paper Section V and Algorithm 1 require
+Actor adaptation of Q/R, but **do not specify 8 independent scalars**;
+this is an explicit project design choice.
+
+## Actor observations and MLP — proposal awaiting user approval
+
+Paper Eq. (3), Section II(b): the RL MDP state includes both system states
+and tracking errors. Remark 7 says the MDP state is distinct from the
+physical system state. Paper does not fix the observation vector size
+or NN layer widths. The user document pages 34–36 specifies an Actor
+Gaussian policy whose neural network learns BOTH mean and dispersion.
+
+Proposed **17-dimensional** observation, pending sign-off:
+
+`s_RL = [x(6), e(6), u_previous(2), path_progress(1),
+          curvature_now(1), curvature_at_horizon_end(1)]`.
+
+- `x=[vx,vy,psi,r,X,Y]`; `e=x-xref`, with heading wrapped.
+- Previous `[a,delta]` is relevant to input-difference cost/constraints.
+- Arc-length path progress and preview curvature are added as
+  implementation choices to distinguish upcoming reference geometry;
+  the paper **does not specify them**.
+- Whether this finite vector is sufficiently Markov is not proven.
+  Speed-varying/longer preview may demand additional reference information.
+- For simulation, x is presently the model state; a real observer
+  and sensor estimates remain a separate implementation task.
+
+Proposed Actor Gaussian NN — **not yet approved or coded**:
+`17 input -> two fully connected hidden layers of width 64 with tanh
+-> mu(8) and dispersion_raw(8) output heads` (16 numbers).
+Dispersion is constrained positive in the Gaussian policy.
+Sample latent vector `z = mu + sigma * standard_normal(8)`;
+map z into the eight strictly positive admissible weight intervals,
+e.g. smooth squashing, with learned mu/sigma and correct policy
+log-probability for the sampled latent vector.
+
+The **two-by-64 hidden architecture**, activation function, Gaussian
+scale limits, squash details, numerical weight bounds, learning rates,
+and policy initialization are **implementation proposals**, NOT
+equations prescribed by the paper. Do not write Actor training code
+or claim its admissible set is stability-certified before approval
+and the paper's offline feasibility/terminal-conditions screening.
