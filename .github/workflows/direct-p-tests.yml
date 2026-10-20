@@ -21,3 +21,9 @@ jobs:
       - name: CLI help
         working-directory: nmpc_casadi
         run: python train_direct_p.py --help
+      - name: Short CasADi NMPC smoke train (two mini episodes)
+        working-directory: nmpc_casadi
+        run: python train_direct_p.py --mode smoke --seconds 1 --rollout-steps 1 --output results_direct_p_ci/smoke
+      - name: Validate smoke checkpoint and metrics
+        working-directory: nmpc_casadi
+        run: python -c "import pandas as pd, pathlib; p=pathlib.Path('results_direct_p_ci/smoke'); d=pd.read_csv(p/'training_history.csv'); assert len(d)==2; assert (p/'checkpoint.npz').is_file(); assert d['solver_success_pct'].notna().all()"
