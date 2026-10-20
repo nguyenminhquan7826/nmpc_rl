@@ -22,6 +22,7 @@ import rl_nmpc as rl
 from direct_p_critic import DirectPAgent
 from adapt_nmpc import install_evaluation_track, plant_for_profile
 from heldout_reference import sha256_file
+from plot_direct_p_logs import plot_evaluation_output
 
 CONTROLLERS = (
     'fixed_nmpc',
@@ -125,6 +126,8 @@ def main():
     parser.add_argument('--actor-lr', type=float, default=.001)
     parser.add_argument('--critic-lr', type=float, default=.001)
     parser.add_argument('--nominal-only', action='store_true')
+    parser.add_argument('--no-plots', action='store_true',
+                        help='Disable PNG plots; CSV/logs and test protocol remain unchanged')
     parser.add_argument('--track', choices=['heldout_s_bend', 'training'],
                         default='heldout_s_bend')
     parser.add_argument('--track-csv', type=Path, default=None)
@@ -222,6 +225,12 @@ def main():
                     subset.loc['actor_frozen_initial_p_sampled', metric])
             paired.append(row)
     pd.DataFrame(paired).to_csv(args.output / 'paired_deltas.csv', index=False)
+
+    # Reconstruct comparison diagrams from the saved logs. Read-only: never
+    # invokes a controller, changes weights, or consumes another RNG sample.
+    if not args.no_plots:
+        plot_evaluation_output(args.output)
+        print('PLOTS_GENERATED=' + str(args.output), flush=True)
 
     # A compact report summarizing the strict held-out frozen-policy arm.
     frozen = table[table.controller == 'direct_p_frozen_sampled']
