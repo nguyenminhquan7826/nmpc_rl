@@ -1,93 +1,67 @@
-# Direct-P Actor NN + Critic TD(0) — NMPC
+# NMPC-only baseline — rebuild from paper, without reinforcement learning
 
-**Branch:** \`experiment/direct-quadratic-td-critic\`  
-**Original research repo:** \`nguyenminhquan7826/nmpc_rl\`  
-**Full snapshot before removing historical outputs:** \`backup/direct-p-before-cleanup-20261020\`
+This experiment branch now contains **only the nonlinear model-predictive
+controller (NMPC), six-state nonlinear bicycle model, reference processing,
+fixed NMPC diagnostics, and numerical tests**. There is **no Actor, Critic,
+policy, TD learning, neural network, training or RL evaluation code** in this
+branch.
 
-This branch keeps the **runnable Direct-P experiment**, its imported numerical
-model and CAD reference helpers, plots and regression tests. Large old NN-Critic
-results, their raw episode logs and unused legacy scripts are removed **from
-this branch only**. They remain available in the backup branch or Git history.
-Original branches \`main\`, \`experiment/frozen-vs-online-ac-nmpc\`, etc. were
-not touched.
+The previous Direct-P branch is preserved unchanged at:
+[backup/direct-p-before-nmpc-only-reset-20261020](https://github.com/nguyenminhquan7826/nmpc_rl/tree/backup/direct-p-before-nmpc-only-reset-20261020).
 
-## Relevant files
+## Fixed NMPC math (existing implementation, not modified by this cleanup)
 
-| File | Purpose |
-|---|---|
-| \`nmpc_casadi/train_direct_p.py\` | Train Actor NN and six positive diagonal terminal coefficients using TD(0) |
-| \`nmpc_casadi/eval_direct_p_heldout.py\` | Compare Fixed NMPC / frozen Actor & P / test-time adaptation on held-out track |
-| \`nmpc_casadi/direct_p_critic.py\` | Direct six-parameter semi-gradient TD Critic, inherited NN Actor |
-| \`nmpc_casadi/plot_direct_p_logs.py\` | Automatically make or regenerate all train/test PNGs from CSV |
-| \`nmpc_casadi/rl_nmpc.py\` | Shared Actor NN, environment, reward, Gaussian policy, checkpoint utilities |
-| \`nmpc_casadi/baseline.py\`, \`nmpc_casadi/nmpc_casadi.py\` | Vehicle model, reference manager, CasADi NMPC |
-| \`nmpc_casadi/adapt_nmpc.py\` | Held-out reference and plant profiles used by evaluator; retains older diagnostic helpers |
-| \`nmpc_casadi/qfpsi_isolation.py\` | Transitive import of \`adapt_nmpc.py\`, required until that module is refactored |
-| \`nmpc_casadi/test_*.py\` | Direct-P, plotting, reference, reward and adapter regression tests |
+- States: [vx, vy, psi, r, X, Y], control input [a, delta].
+- Continuous bicycle dynamics: vehicle_model_casadi_variants.py.
+- ZOH + RK4 discretization with Ts=0.071 s.
+- Multiple shooting, prediction horizon N=10, CasADi SQP/QRQP.
+- Tracking stage Q, control increment R and terminal Qf quadratic costs.
+- State/input/input-increment constraints and heading angle wrapping.
+- Geometric CAD XREF/reference projection by ReferenceManager.
 
-See \`nmpc_casadi/DIRECT_P_EXPERIMENT.md\`,
-\`nmpc_casadi/DIRECT_P_PLOTTING.md\` and
-\`nmpc_casadi/DIRECT_P_HELDOUT_RESULTS.md\` for details.
+**The code is not yet certified to reproduce the paper.** Consult
+NMPC_THEORY_AUDIT.md before modifying any physical or mathematical convention.
 
-## Windows PowerShell quick start
+## Setup
 
-Use a virtual environment with Python 3.11–3.13 and install requirements:
+    cd D:\GitHub\RL_NMPC\Code\nmpc_rl_direct_p
+    git pull --ff-only origin experiment/direct-quadratic-td-critic
+    cd nmpc_casadi
+    python -m pip install -r requirements.txt
+    python -m unittest -v test_nmpc_core
 
-\`\`\`powershell
-cd D:\GitHub\RL_NMPC\Code\nmpc_rl_direct_p
-git pull --ff-only origin experiment/direct-quadratic-td-critic
-cd nmpc_casadi
-python -m pip install -r requirements.txt
-python -m unittest -v test_direct_p_critic test_direct_p_plots
-\`\`\`
+## Run fixed NMPC — no training
 
-The independent TRAIN/TEST XREF CSV files are **local user-supplied data**;
-the repository does not commit them. For example,
-\`reference_split/train_xref.csv\` and \`reference_split/test_xref.csv\` should
-already exist in your clone. Confirm with \`Test-Path\` before running.
+Default CAD reference (existing smoothed reference, original baseline weights):
 
-### Train: 100 episodes, rollout batch of 16 transitions
+    python run_nmpc.py --output results_nmpc\default --seconds 120
 
-\`\`\`powershell
-python train_direct_p.py \`
-  --mode train --train-component both \`
-  --episodes 100 --seconds 120 --rollout-steps 16 \`
-  --actor-lr 0.001 --critic-lr 0.001 --seed 0 \`
-  --eval-every 10 --plot-every 10 \`
-  --train-xref .\reference_split\train_xref.csv \`
-  --output direct_results\train_direct_p_100_new
-\`\`\`
+With your two independent 10-column reference files (these are separate
+**NMPC path-following tests**, not Actor/Critic TRAIN or TEST):
 
-### Evaluate on the **different** user-provided TEST track
+    python run_nmpc.py --reference .\reference_split\train_xref.csv --seconds 120 --output results_nmpc\path_one
+    python run_nmpc.py --reference .\reference_split\test_xref.csv --seconds 150 --output results_nmpc\path_two
 
-\`\`\`powershell
-python eval_direct_p_heldout.py \`
-  --checkpoint direct_results\train_direct_p_100_new\checkpoint.npz \`
-  --track-csv .\reference_split\test_xref.csv \`
-  --training-reference-manifest direct_results\train_direct_p_100_new\training_reference_manifest.json \`
-  --seconds 150 --output direct_results\eval_direct_p_100_new
-\`\`\`
+Or specify explicit fixed diagonals without any adaptive/RL tuning:
 
-### Regenerate old experiment plots without retraining
+    python run_nmpc.py --q 12 3 15 6 183.75 192.5 --r 0.6 16 --qf 180 45 225 90 2756.25 2887.5 --output results_nmpc\weights_trial
 
-\`\`\`powershell
-python plot_direct_p_logs.py \`
-  --train-dir .\direct_results\train_direct_p_ep100_roll16 \`
-  --eval-dir .\direct_results\eval_direct_p_ep100_roll16 \`
-  --plot-every 10
-\`\`\`
+The output contains nmpc_fixed.csv, summary.json, config.json and
+trajectory.png, cross_track_error.png, heading_and_control.png. Each run
+requires a new/empty output directory.
 
-These commands **do not** select the best checkpoint automatically. The
-trained \`checkpoint.npz\` is the last checkpoint; do not select models using
-the held-out test track.
+The long-standing pure-NMPC sweep and plant robustness modes are preserved in
+baseline.py, but they have **nothing to do with Actor–Critic**:
 
-## Cleanup notes
+    python baseline.py --mode single
 
-- A backup branch at \`backup/direct-p-before-cleanup-20261020\` preserves all
-  old tracked snapshots and checkpoints. See GitHub if historical NN-Critic
-  results are needed.
-- \`.gitignore\` prevents new local output artifacts from being committed.
-  Generated \`direct_results\` and \`reference_split\` remain on your computer.
-- \`git pull\` modifies tracked files in the clone. If you modified old
-  Git-tracked results locally, **back them up first and do not use
-  \`git reset --hard\` or \`git clean -fd\`**.
+## Scientific guardrails
+
+1. Part I of the user's NMPC theory document is the working reference.
+2. Reconcile every discrepancy in NMPC_THEORY_AUDIT.md against the **original
+   paper** before claiming paper reproduction.
+3. No new Actor/Critic algorithm should be added without tracing its explicit
+   equations, state/action definitions and update rules back to the supplied
+   paper, and verifying with the user.
+4. Numerical results from the old RL experiment are preserved in the backup
+   branch; they are not evidence about this newly isolated controller.

@@ -1,0 +1,40 @@
+name: NMPC-only equations and runtime checks
+on:
+  push:
+    branches:
+      - experiment/direct-quadratic-td-critic
+  workflow_dispatch:
+jobs:
+  nmpc-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: nmpc_casadi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install NMPC dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test NMPC equations reference data and solver shape
+        run: python -m unittest -v test_nmpc_core
+      - name: Test standalone NMPC CLI
+        run: python run_nmpc.py --seconds 1 --output results_nmpc_ci/smoke
+      - name: Verify CSV, config and diagnostic PNGs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import pandas as pd
+          d=Path('results_nmpc_ci/smoke')
+          for name in ['nmpc_fixed.csv', 'summary.json','config.json',
+                       'trajectory.png', 'cross_track_error.png','heading_and_control.png']:
+              p=d/name
+              assert p.is_file() and p.stat().st_size>0,name
+          meta=json.loads((d/'config.json').read_text())
+          assert meta['controller']=='fixed_weight_nmpc_no_rl'
+          data=pd.read_csv(d/'nmpc_fixed.csv')
+          assert len(data)>0 and data['solver_success'].sum()>0
+          PY

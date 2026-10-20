@@ -10,7 +10,16 @@ import shutil
 import numpy as np
 import pandas as pd
 
-from heldout_reference import sha256_file
+from hashlib import sha256
+
+
+def sha256_file(path):
+    """Checksum reference bytes, independently of the removed RL evaluation tools."""
+    digest = sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 REQUIRED_XREF_COLUMNS = (
