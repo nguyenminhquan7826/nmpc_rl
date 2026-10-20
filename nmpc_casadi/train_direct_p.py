@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import rl_nmpc as rl
 from direct_p_critic import DirectPAgent
+from cad_eval_reference import prepare_cad_evaluation_reference
+from heldout_reference import sha256_file
 
 CONTROLLERS = ('fixed_nmpc', 'direct_p_frozen', 'direct_p_actor_only',
                'direct_p_critic_only', 'direct_p_both')
@@ -104,6 +106,8 @@ def main():
     ap.add_argument('--p-min-multiplier',type=float,default=.5)
     ap.add_argument('--p-max-multiplier',type=float,default=50.)
     ap.add_argument('--checkpoint',type=Path)
+    ap.add_argument('--train-xref',type=Path,default=None,
+                    help='Use a separate 10-column training XREF without changing repository CAD references')
     ap.add_argument('--output',type=Path,required=True)
     args=ap.parse_args()
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('Evaluate requires --checkpoint')
@@ -112,10 +116,35 @@ def main():
     if args.output.exists() and any(args.output.iterdir()):
         ap.error('Output folder must be empty; old results are protected')
     args.output.mkdir(parents=True,exist_ok=True)
+    training_reference=None
+    if args.train_xref is not None:
+        # Install a private, validated training reference only for this process.
+        # The checked-in original training CSV and all earlier experiments remain untouched.
+        src=args.train_xref.expanduser().resolve(strict=True)
+        reference_info, training_reference=prepare_cad_evaluation_reference(
+            src, args.output, rl.b.TAIL_LENGTH_M,
+            min_speed_mps=float(rl.b.cfg['vx_min']),
+            max_speed_mps=min(float(rl.b.TEST_SPEED_MPS),float(rl.b.cfg['vx_max'])),
+            wheelbase_m=float(rl.b.WHEELBASE_M),
+            steering_limit_rad=min(abs(float(rl.b.cfg['u_min'][1])),
+                                   abs(float(rl.b.cfg['u_max'][1]))),
+        )
+        rl.b.TAIL_FILE=Path(training_reference['tail_file'])
+        rl.b.REF_INFO=reference_info
+        rl.b.CAD_S_END=float(reference_info['cad_s_end'])
+        training_reference.update(
+            original_source=str(src), original_source_sha256=sha256_file(src),
+            role='TRAIN_ONLY',
+            note='Custom training reference; never copy this path into held-out evaluation',
+        )
+        (args.output/'training_reference_manifest.json').write_text(
+            json.dumps(training_reference,indent=2),encoding='utf-8')
     env=rl.Environment(args.seconds)
     config={k:(str(v) if isinstance(v,Path) else v) for k,v in vars(args).items()}
     config.update(critic='direct_diagonal_quadratic',td='one_step_semi_gradient',
-                  stage_reward='unchanged_R3A_fixed_eval',Ts=rl.b.Ts,N=rl.b.N)
+                  stage_reward='unchanged_R3A_fixed_eval',Ts=rl.b.Ts,N=rl.b.N,
+                  training_reference=training_reference,
+                  training_path_length_m=float(rl.b.CAD_S_END))
     (args.output/'config.json').write_text(json.dumps(config,indent=2))
     agent=make_agent(args)
     if args.mode=='evaluate':
