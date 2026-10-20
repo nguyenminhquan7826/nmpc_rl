@@ -18,7 +18,7 @@ def tracking_error(x, xref):
     )
 
 
-def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
+def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod', adaptive_cost_weights=False):
     """
     Multiple-shooting NMPC with X0 treated as an NLP parameter.
 
@@ -31,6 +31,13 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
         u_prev     : previously applied input, shape (2,)
         xref_0_N   : reference states Xref_0 ... Xref_N, shape (6,N+1)
         p_model    : model parameters, shape (9,)
+        When adaptive_cost_weights=True, additionally:
+        Q diagonal : Actor-chosen six positive stage weights
+        R diagonal : Actor-chosen two positive input-increment weights
+        Qf diagonal: six learned Critic P coefficients
+
+    The adaptive mode only parameterizes the EXISTING quadratic objective;
+    dynamics, all constraints, and the fixed-weight default remain unchanged.
     """
     Q = ca.DM(Q)
     R = ca.DM(R)
@@ -41,7 +48,7 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
     U = ca.SX.sym('U', NU, N)
 
     n_ref = NX * (N + 1)
-    nP = NX + NU + n_ref + NP
+    nP = NX + NU + n_ref + NP + (NX + NU + NX if adaptive_cost_weights else 0)
     P = ca.SX.sym('P', nP)
 
     off = 0
@@ -53,6 +60,15 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
     off += n_ref
     p_model = P[off:off + NP]
     off += NP
+    if adaptive_cost_weights:
+        # Direct-P Critic: Qf = diag(p1,...,p6), never a Critic NN output.
+        # Q and R are the Actor's stage/input-increment parameters.
+        Q = ca.diag(P[off:off + NX])
+        off += NX
+        R = ca.diag(P[off:off + NU])
+        off += NU
+        Qf = ca.diag(P[off:off + NX])
+        off += NX
     J = 0
     g_list = []
     lbg = []
@@ -193,7 +209,7 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
     }
 
 
-def pack_parameters(x0, u_prev, xref, p_model):
+def pack_parameters(x0, u_prev, xref, p_model, weights=None):
     """
     xref input shape: (N+1, 6), one state per row.
     Packing matches CasADi reshape(..., 6, N+1), which is column-major.
@@ -207,7 +223,20 @@ def pack_parameters(x0, u_prev, xref, p_model):
         raise ValueError('xref must have shape (N+1, 6)')
 
     xref_flat = xref.T.reshape(-1, order='F')
-    return np.concatenate([x0, u_prev, xref_flat, p_model])
+    parts = [x0, u_prev, xref_flat, p_model]
+    if weights is not None:
+        if len(weights) != 3:
+            raise ValueError("weights must have (Q[6], R[2], Qf[6])")
+        diagonal_parts = []
+        for name, values, size in (("Q", weights[0], NX),
+                                   ("R", weights[1], NU),
+                                   ("Qf", weights[2], NX)):
+            v = np.asarray(values, dtype=float)
+            if v.shape != (size,) or not np.all(np.isfinite(v)) or np.any(v <= 0.):
+                raise ValueError(f"{name} must be {size} positive finite diagonal values")
+            diagonal_parts.append(v)
+        parts.extend(diagonal_parts)
+    return np.concatenate(parts)
 
 
 def unpack_solution(z_star, N):
