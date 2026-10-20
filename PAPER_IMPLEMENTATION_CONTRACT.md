@@ -135,41 +135,110 @@ TD(0)-learned parameters. Paper Section V and Algorithm 1 require
 Actor adaptation of Q/R, but **do not specify 8 independent scalars**;
 this is an explicit project design choice.
 
-## Actor observations and MLP — proposal awaiting user approval
+## Approved Actor observation dimension — 17 real features
 
-Paper Eq. (3), Section II(b): the RL MDP state includes both system states
-and tracking errors. Remark 7 says the MDP state is distinct from the
-physical system state. Paper does not fix the observation vector size
-or NN layer widths. The user document pages 34–36 specifies an Actor
-Gaussian policy whose neural network learns BOTH mean and dispersion.
+**Decision: user approved 17 inputs, 8 independent Actor weight outputs,
+and neural training of BOTH Gaussian mean and standard deviation.**
+Keep the six-scalar direct TD Critic exactly as specified above. The
+17-feature composition below follows the previously presented proposal:
 
-Proposed **17-dimensional** observation, pending sign-off:
+`s_RL = [x_current(6), error_current(6), u_previous(2),
+         path_progress(1), curvature_now(1), curvature_at_horizon_end(1)]`
 
-`s_RL = [x(6), e(6), u_previous(2), path_progress(1),
-          curvature_now(1), curvature_at_horizon_end(1)]`.
+Orders and definitions:
+- `x_current = [vx, vy, psi, r, X, Y]` (physical current state)
+- `error_current = [vx-vx_ref, vy-vy_ref,
+                    wrap(psi-psi_ref), r-r_ref,
+                    X-X_ref, Y-Y_ref]` (same six coordinates as NMPC)
+- `u_previous = [a_previous, delta_previous]`
+- `path_progress = s`, interpolated/projected arc length (meters)
+- `curvature_now, curvature_at_horizon_end` as ReferenceManager provides
 
-- `x=[vx,vy,psi,r,X,Y]`; `e=x-xref`, with heading wrapped.
-- Previous `[a,delta]` is relevant to input-difference cost/constraints.
-- Arc-length path progress and preview curvature are added as
-  implementation choices to distinguish upcoming reference geometry;
-  the paper **does not specify them**.
-- Whether this finite vector is sufficiently Markov is not proven.
-  Speed-varying/longer preview may demand additional reference information.
-- For simulation, x is presently the model state; a real observer
-  and sensor estimates remain a separate implementation task.
+The paper's Eq. (3) and Remark 7 specify that MDP state includes
+vehicle state and tracking information, but NOT this particular
+17-element vector. Its Markov sufficiency is *not proven*; the actor
+gets curvature preview, but not the full N+1 future speed/reference
+sequence. This is an implementation decision approved by the user.
 
-Proposed Actor Gaussian NN — **not yet approved or coded**:
-`17 input -> two fully connected hidden layers of width 64 with tanh
--> mu(8) and dispersion_raw(8) output heads` (16 numbers).
-Dispersion is constrained positive in the Gaussian policy.
-Sample latent vector `z = mu + sigma * standard_normal(8)`;
-map z into the eight strictly positive admissible weight intervals,
-e.g. smooth squashing, with learned mu/sigma and correct policy
-log-probability for the sampled latent vector.
+### Normalization PROPOSAL — not yet approved or coded
 
-The **two-by-64 hidden architecture**, activation function, Gaussian
-scale limits, squash details, numerical weight bounds, learning rates,
-and policy initialization are **implementation proposals**, NOT
-equations prescribed by the paper. Do not write Actor training code
-or claim its admissible set is stability-certified before approval
-and the paper's offline feasibility/terminal-conditions screening.
+Normalize observations via a **fixed deterministic physical-scale map**
+rather than per-batch standardization or statistics from TEST.
+
+For the present 1:10 baseline:
+```text
+  z = [
+     vx/0.10, vy/0.06, wrap(psi)/pi, r/0.50,
+     (X-X_origin)/L_train, (Y-Y_origin)/L_train,
+     e_vx/0.10, e_vy/0.06, wrap(e_psi)/0.20, e_r/0.50,
+     e_X/0.10, e_Y/0.10,
+     a_previous/2.0, delta_previous/0.55,
+     (s-s_start)/(s_end-s_start),
+     kappa_now/2.0, kappa_horizon/2.0,
+  ]
+```
+
+This is precisely 17 features. Physical scales for original tracking
+errors, previous acceleration and steering, and curvature are informed
+by the earlier project's explicit 12-feature `SCALE` vector
+`[.1,.06,.2,.5,.1,.1,.1,2.,.55,2.,2.,1.]`.
+The 0.1 m/s is the **current controlled experiment** reference speed
+rather than the maximum speed in the original unmodified CAD CSV.
+The physical heading coordinate is wrapped to `(-pi, pi]` then divided
+by `pi`; that representation has a branch-cut discontinuity near
+`±pi`, which must be tracked in diagnostics. Its error coordinate
+uses the existing NMPC heading wrap and 0.20 rad legacy scale.
+
+`X_origin,Y_origin`: first point of the run's supplied reference curve,
+not future trajectory values; removes *translation* dependence (but
+NOT rotation dependence). `L_train`: strictly positive length of the
+TRAIN reference, fixed and saved with checkpoints for both TRAIN and
+TEST. For the current source TRAIN curve this is approximately
+7.9785 meters; use the actual loaded file value when coding.
+The `path_progress` coordinate is normalized to [0,1] using
+its own reference's available start/end arc lengths, not estimated
+tracking outcomes. Do NOT clip normalized values to [-1,1] by default,
+as that would silently erase meaningful large deviations.
+No input mean/std is estimated using held-out TEST samples.
+
+The proposed numeric scales are **implementation choices**, not
+paper-specified numerical constants; train/validation diagnostics
+should verify their ranges before calling them finalized.
+The specific TRAIN XREF chosen for training must be pinned (SHA256)
+before selecting `L_train`.
+
+### Gaussian MLP PROPOSAL — not yet approved or coded
+
+- Inputs: 17 normalized physical/trajectory observations
+- MLP: fully connected `17 -> 64 -> 64`; hidden `tanh`
+- Heads: `mu(s) in R^8` and `raw_sigma(s) in R^8`
+- Both heads get **learnable NN parameters**; total network parameters
+  = `(17*64+64)+(64*64+64)+2*(64*8+8)=6352`.
+- Sample **8-dimensional latent action** `z=mu+sigma*epsilon`,
+  `epsilon ~ N(0,I_8)`.
+- Candidate dispersion map `sigma_i = sigma_lo +
+  (sigma_hi - sigma_lo) * sigmoid(raw_sigma_i)` (strictly positive).
+  `sigma_lo, sigma_hi` and initial sigma are **not approved**.
+- Map sampled latent `z` monotonically to all eight positive,
+  independently bounded physical stage penalties, e.g.
+  `w_i = lo_i + (hi_i-lo_i)*(1+tanh(z_i))/2`.
+  This enforces box bounds but NOT the paper's terminal-invariant-set
+  assumptions; the admissible box needs offline screening.
+- The policy score-function loss must use the log-probability of
+  the **sampled latent z** under the eight-dimensional Gaussian
+  policy, with `z` treated as the sampled action (no gradient
+  through NMPC). If instead log-probability of transformed
+  physical weights is used, the transformation Jacobian must
+  be consistently accounted for.
+- Initialization should make **deterministic** `z=mu` reproduce
+  the initial nominal Q/R, assuming each baseline weight lies
+  strictly inside an approved [lo,hi]. Stochastic samples are
+  appropriately bounded but need not equal the baseline.
+- At deterministic evaluation use `z=mu`; frozen evaluation
+  disables training/updates, not state dependence.
+
+The MLP widths, Tanh choice, fixed numerical normalizers, dispersion
+limit, optimizer, and weight-bounds are NOT specified in the source paper;
+none is being silently presented as paper fact. Pending final approval
+for observation normalizers and MLP before writing NN code, and separate
+approval/screening for numeric Q/R/P bounds and learning rates.
