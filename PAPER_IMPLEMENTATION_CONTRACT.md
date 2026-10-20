@@ -1,6 +1,6 @@
 # Source-to-implementation contract — Actor–Critic–NMPC rebuild
 
-**Status:** Source-mapped mathematics plus implemented six-parameter direct Critic and NMPC weight bridge; no Actor NN or training yet.
+**Status:** Source-mapped equations, implemented six-parameter direct Critic, independently tested 17-input Gaussian Actor, and NMPC weight bridge. No joint RL training driver yet.
 **Sources of authority:** User's `MPC_RL.pdf` (9 pages), and
 `NMPC(1).docx` (37 pages). The paper has higher priority where the two
 disagree. **No unilateral architecture or numerical change.**
@@ -160,7 +160,7 @@ vehicle state and tracking information, but NOT this particular
 gets curvature preview, but not the full N+1 future speed/reference
 sequence. This is an implementation decision approved by the user.
 
-### Normalization PROPOSAL — not yet approved or coded
+### Approved 17-dimensional physical normalization — implemented
 
 Normalize observations via a **fixed deterministic physical-scale map**
 rather than per-batch standardization or statistics from TEST.
@@ -210,7 +210,7 @@ should verify their ranges before calling them finalized.
 The specific TRAIN XREF chosen for training must be pinned (SHA256)
 before selecting `L_train`.
 
-### Gaussian MLP PROPOSAL — not yet approved or coded
+### Approved 17 → 64 → 64 Gaussian MLP — implemented
 
 - Inputs: 17 normalized physical/trajectory observations
 - MLP: fully connected `17 -> 64 -> 64`; hidden `tanh`
