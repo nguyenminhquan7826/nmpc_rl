@@ -112,7 +112,9 @@ class DirectPCriticTests(unittest.TestCase):
         critic.td_step(np.array([.1,0.,0.,0.,0.,0.]),np.zeros(6),-1.,.99,.01)
         par2 = actor_critic_nmpc_parameters(
             x0, prev, xr, b.p_nominal, np.diag(q), np.diag(r), critic)
-        self.assertGreater(par2[-6], par[-6])
+        # With the baseline P0=180, e_vx=0.1 and r=-1, delta>0;
+        # the correct semi-gradient update lowers p_vx, not raises it.
+        self.assertLess(par2[-6], par[-6])
 
     def test_pack_default_fixed_interface_unchanged(self):
         q,r,qf = b.get_robust_controller_weights()
