@@ -1,6 +1,6 @@
 # Source-to-implementation contract — Actor–Critic–NMPC rebuild
 
-**Status:** Mathematical core only; no Actor or Critic network, no training.
+**Status:** Source-mapped mathematics plus implemented six-parameter direct Critic and NMPC weight bridge; no Actor NN or training yet.
 **Sources of authority:** User's `MPC_RL.pdf` (9 pages), and
 `NMPC(1).docx` (37 pages). The paper has higher priority where the two
 disagree. **No unilateral architecture or numerical change.**
@@ -21,7 +21,7 @@ comparable and reproducible.
 | Eq. (6) | `delta=r+gamma*V(s_next)-V(s)`; TD(0) | `rl_paper_core.td_error` |
 | Eq. (7) | `L_critic=0.5*delta²` | `rl_paper_core.critic_squared_td_loss` |
 | Eq. (8) | Policy-gradient ascent proportional to `delta*grad_actor(log pi_actor)` | Scalar loss identity tested; actor not built |
-| Figure 3; Section V(a); Algorithm 1, steps 4-7 | Actor tunes `Q,R`; Critic tunes `Qf`; NMPC chooses `u=[a,delta]` | Pending architecture |
+| Figure 3; Section V(a); Algorithm 1, steps 4-7 | Actor tunes `Q,R`; Critic tunes `Qf`; NMPC chooses `u=[a,delta]` | Six directly learned Critic P parameters and parameterized NMPC bridge implemented; Actor pending |
 | Eq. (29)-(33) | Positive weight matrices and Euclidean projection onto an offline-screened compact admissible parameter set | Box projection implemented, but NOT certified stable |
 | Assumptions 2-4, Eq. (39)-(40) | Terminal invariant set/local control law/terminal Lyapunov decrease required for cited stability theorem | **NOT implemented or verified** in legacy NMPC. Do not claim theorem holds |
 
@@ -65,10 +65,16 @@ comparable and reproducible.
 1. **Done:** preserve NMPC-only branch and source-register differences.
 2. **Done:** implement architecture-independent paper Eq. (4), (6)-(8),
    projection Eq. (29)-(33), deterministic unit tests.
-3. **Requires decision:** Critic = NN outputting six positive `Qf(s)`
-   entries (document Section II) **or** six directly optimized coefficients
-   `P` (prior project architecture).
-4. **Requires decisions grounded in source:** actor observation `s`,
+3. **DONE / user-approved:** Critic has **exactly six directly trained**
+   terminal coefficients `p_i` and NO NN: `P=diag(p1,...,p6)`,
+   `V_P(s)=-e(s)^T P e(s)`, and **the SAME** `Qf=P` passes to NMPC.
+   TD(0) semi-gradient: `dL/dp_i=delta * e_i^2` with bootstrap target
+   frozen, then `p <- project_box(p - critic_lr * gradient)`.
+   Bounds, gamma and critic learning rate are caller-supplied; **no**
+   undocumented default. Implemented in `nmpc_casadi/direct_p_critic.py`
+   and connected through `critic_nmpc_bridge.py`, using optional adaptive
+   diagonals in `nmpc_casadi.py`; fixed default remains unchanged.
+4. **Still requires decisions grounded in source:** actor observation `s`,
    action dimensions, Gaussian mean/scale map, admissible regions,
    training schedule, terminal handling, and vehicle scaling.
 5. Only then build Actor/Critic and connect a separate RL driver to NMPC;
@@ -77,3 +83,39 @@ comparable and reproducible.
 
 **No change to the validated NMPC solver or vehicle dynamics is authorized
 by implementing this module.**
+
+## Explicit deviation from user's NMPC(1).docx pages 36–37
+
+| Issue | Document's pages 36–37 | Approved direct-six-parameter Critic |
+|---|---|---|
+| Trainable architecture | Neural Network producing six terminal weights from MDP state | Six physical positive scalar parameters **only**; no network layers, biases, learned baseline, or state-conditioned output |
+| Terminal weights | `Qf_theta(s)` depends on current observed state through NN | `Qf=P=diag(p1,...,p6)` is global while trained; changes after TD update, not directly as a function of `s` |
+| Value | `V_theta(s)=-e(s)^T Qf_theta(s)e(s)` | `V_P(s)=-e(s)^T P e(s)` |
+| Critic optimization | Backpropagation through NN output and value | Direct semi-gradient from squared one-step TD loss, `grad_p_i = delta*e_i^2`, projected onto supplied positive box |
+| State feedback | NN changes terminal weights for different states | State affects value through `e(s)` and influences later P updates, **but identical P for different states before an update** |
+| Paper authority | Specific implementation from explanatory document | Remark 4 in MPC_RL.pdf expressly permits *any parameterized critic architecture* |
+
+This is the user's **explicit 2026-10-20 architecture decision**, not an
+inference from paper Eq. (6). It is a permitted specialization under Remark
+4 rather than an exact reproduction of document pages 36–37.
+
+**Numerical and methodological limitations:**
+- The 6 diagonal P entries are **physical Qf weights** with state order
+  `[vx,vy,psi,r,X,Y]`, not a hidden normalized/log/multiplier space.
+- For reference error `e`, wrap heading to `(-pi,pi]` as in existing NMPC.
+- Given reward `r`, `delta=r+gamma V_P(next)-V_P(current)`.
+  In a genuinely terminal transition, substitute `V(next)=0`; retain
+  bootstrap at a time-limit truncation. Paper Eq. (6) omits episode endings.
+- Squared TD loss is `0.5*delta**2`; **do not** differentiate the bootstrap
+  target (`delta*e_i**2` is *semi-gradient*, not full residual gradient).
+- An externally supplied projection box is necessary but does **not**
+  imply Assumptions 3–4 / terminal invariant set are satisfied. Existing
+  fixed NMPC cannot yet be called stability-certified.
+- Future training should test whether constant P has enough expressive
+  power for this path tracking problem. It may be inadequate even if
+  its TD optimization is implemented correctly. This is a scientific
+  limitation, not evidence that the implementation violates Remark 4.
+- Paper's MPC formulas include factors of 1/2 in Algorithm 1, while the
+  preexisting CasADi NMPC cost uses no such *global* factor. The bridge
+  DOES NOT rescale any coefficients or alter the historical baseline.
+  The bridge only passes six learned Qf entries into the SAME objective.
