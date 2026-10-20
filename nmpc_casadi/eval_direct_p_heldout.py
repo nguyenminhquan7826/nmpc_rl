@@ -21,6 +21,7 @@ import pandas as pd
 import rl_nmpc as rl
 from direct_p_critic import DirectPAgent
 from adapt_nmpc import install_evaluation_track, plant_for_profile
+from heldout_reference import sha256_file
 
 CONTROLLERS = (
     'fixed_nmpc',
@@ -127,6 +128,8 @@ def main():
     parser.add_argument('--track', choices=['heldout_s_bend', 'training'],
                         default='heldout_s_bend')
     parser.add_argument('--track-csv', type=Path, default=None)
+    parser.add_argument('--training-reference-manifest', type=Path, default=None,
+                        help='Manifest from external --train-xref; reject train/test reuse')
     parser.add_argument('--payload-start', type=float, default=30.)
     parser.add_argument('--payload-ramp-s', type=float, default=10.)
     parser.add_argument('--payload-fraction', type=float, default=.10)
@@ -147,11 +150,28 @@ def main():
     if metadata.get('critic_architecture') != 'direct_diagonal_quadratic':
         parser.error('Checkpoint is NOT the six-parameter Direct-P architecture')
     construct_agent(args, metadata)  # Fail before changing any evaluation source.
+    training_manifest = None
+    if args.training_reference_manifest is not None:
+        manifest_path = args.training_reference_manifest.expanduser().resolve(strict=True)
+        training_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        required = {'original_source_sha256', 'reference_sha256', 'role'}
+        if not required.issubset(training_manifest) or training_manifest['role'] != 'TRAIN_ONLY':
+            parser.error('Invalid training reference manifest')
+        if args.track_csv is not None:
+            test_sha = sha256_file(args.track_csv.expanduser().resolve(strict=True))
+            if test_sha in (training_manifest['original_source_sha256'], training_manifest['reference_sha256']):
+                parser.error('Train and test XREF are identical; held-out evaluation refused')
 
     reference = install_evaluation_track(
         args.output, args.track, args.track_csv)
     if args.track == 'heldout_s_bend' and not reference['held_out']:
         raise RuntimeError('Evaluation track was not held out')
+    if training_manifest is not None:
+        reference['training_reference_sha256'] = training_manifest['reference_sha256']
+        reference['training_original_source_sha256'] = training_manifest['original_source_sha256']
+        reference['training_source_manifest'] = str(args.training_reference_manifest)
+        (args.output/'reference_manifest.json').write_text(
+            json.dumps(reference, indent=2, ensure_ascii=False), encoding='utf-8')
     # IMPORTANT: install the held-out reference BEFORE constructing Environment.
     env = rl.Environment(args.seconds)
     settings = {
