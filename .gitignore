@@ -218,3 +218,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Direct-P experiment: keep numerical outputs, plots and model checkpoints
+# OUT of the source-code branch. Previously committed archives are preserved
+# in backup/direct-p-before-cleanup-20261020.
+# These patterns do not delete local files; they only prevent new git add.
+*.npz
+*.png
+*.pdf
+/nmpc_casadi/direct_results/
+/nmpc_casadi/results_*/
+/nmpc_casadi/eval_r3a_fixed_frozen_online/
+/nmpc_casadi/sweep_results/*
+!/nmpc_casadi/sweep_results/_xref_with_virtual_tail.csv
+/nmpc_casadi/*_results/
+/nmpc_casadi/outputs/
+/nmpc_casadi/reference_split/
+/nmpc_casadi/_generated/
