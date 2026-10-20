@@ -18,7 +18,7 @@ def tracking_error(x, xref):
     )
 
 
-def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod', adaptive=False):
+def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod'):
     """
     Multiple-shooting NMPC with X0 treated as an NLP parameter.
 
@@ -41,7 +41,7 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod', adaptive=False)
     U = ca.SX.sym('U', NU, N)
 
     n_ref = NX * (N + 1)
-    nP = NX + NU + n_ref + NP + (14 if adaptive else 0)
+    nP = NX + NU + n_ref + NP
     P = ca.SX.sym('P', nP)
 
     off = 0
@@ -53,11 +53,6 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod', adaptive=False)
     off += n_ref
     p_model = P[off:off + NP]
     off += NP
-    if adaptive:
-        Q = ca.diag(P[off:off+6])
-        R = ca.diag(P[off+6:off+8])
-        Qf = ca.diag(P[off+8:off+14])
-
     J = 0
     g_list = []
     lbg = []
@@ -198,7 +193,7 @@ def build_nmpc_solver(Fd, N, Q, R, Qf, cfg, backend='sqpmethod', adaptive=False)
     }
 
 
-def pack_parameters(x0, u_prev, xref, p_model, weights=None):
+def pack_parameters(x0, u_prev, xref, p_model):
     """
     xref input shape: (N+1, 6), one state per row.
     Packing matches CasADi reshape(..., 6, N+1), which is column-major.
@@ -212,13 +207,7 @@ def pack_parameters(x0, u_prev, xref, p_model, weights=None):
         raise ValueError('xref must have shape (N+1, 6)')
 
     xref_flat = xref.T.reshape(-1, order='F')
-    parts = [x0, u_prev, xref_flat, p_model]
-    if weights is not None:
-        w = np.concatenate([np.asarray(v, dtype=float).reshape(-1) for v in weights])
-        if w.size != 14 or not np.all(np.isfinite(w)) or np.any(w <= 0):
-            raise ValueError("weights must contain 6+2+6 positive finite diagonal entries")
-        parts.append(w)
-    return np.concatenate(parts)
+    return np.concatenate([x0, u_prev, xref_flat, p_model])
 
 
 def unpack_solution(z_star, N):
