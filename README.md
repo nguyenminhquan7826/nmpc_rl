@@ -1,3 +1,18 @@
+# Actor–Critic rebuild from the supplied paper — stage 1
+
+This branch deliberately contains only the **source-defined mathematical
+formulas** (`nmpc_casadi/rl_paper_core.py`), equation-level tests, and the
+NMPC-only reference implementation. **Actor and Critic networks are NOT
+created yet** because a key architecture decision (Critic NN versus six
+direct coefficients) is not unambiguously settled by both user materials.
+See [PAPER_IMPLEMENTATION_CONTRACT.md](PAPER_IMPLEMENTATION_CONTRACT.md).
+
+Use `python -m unittest -v test_rl_paper_core test_nmpc_core`.
+The untouched NMPC-only branch is
+`experiment/direct-quadratic-td-critic`.
+
+---
+
 # NMPC-only baseline — rebuild from paper, without reinforcement learning
 
 This experiment branch now contains **only the nonlinear model-predictive

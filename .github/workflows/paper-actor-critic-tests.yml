@@ -1,0 +1,34 @@
+name: Paper RL formula tests (NMPC baseline preserved)
+on:
+  push:
+    branches:
+      - experiment/paper-aligned-actor-critic
+  workflow_dispatch:
+jobs:
+  math-and-nmpc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: nmpc_casadi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install NMPC dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Paper reward TD actor objective and admissible projection
+        run: python -m unittest -v test_rl_paper_core
+      - name: Existing vehicle and NMPC baseline tests
+        run: python -m unittest -v test_nmpc_core
+      - name: Standalone baseline NMPC still works
+        run: python run_nmpc.py --seconds 1 --output results_nmpc_ci/paper_rebuild
+      - name: Confirm reference results
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('results_nmpc_ci/paper_rebuild')
+          for item in ('nmpc_fixed.csv','summary.json','trajectory.png'):
+              assert (root/item).is_file() and (root/item).stat().st_size>0,item
+          PY
