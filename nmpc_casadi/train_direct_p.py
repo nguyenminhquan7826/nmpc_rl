@@ -17,6 +17,10 @@ import rl_nmpc as rl
 from direct_p_critic import DirectPAgent
 from cad_eval_reference import prepare_cad_evaluation_reference
 from heldout_reference import sha256_file
+from plot_direct_p_logs import (
+    plot_training_history, plot_training_episode, plot_profile_overlay,
+    plot_trajectory, plot_cte, plot_weights,
+)
 
 CONTROLLERS = ('fixed_nmpc', 'direct_p_frozen', 'direct_p_actor_only',
                'direct_p_critic_only', 'direct_p_both')
@@ -96,6 +100,10 @@ def main():
     ap.add_argument('--seconds',type=float,default=120)
     ap.add_argument('--rollout-steps',type=int,default=1)
     ap.add_argument('--eval-every',type=int,default=10)
+    ap.add_argument('--plot-every',type=int,default=10,
+                    help='Plot detailed TRAIN episode 0, every N episodes and last episode (default 10)')
+    ap.add_argument('--no-plots',action='store_true',
+                    help='Disable PNG plotting, preserve CSV and all training behavior')
     ap.add_argument('--actor-lr',type=float,default=1e-3)
     ap.add_argument('--critic-lr',type=float,default=1e-3)
     ap.add_argument('--sigma',type=float,default=.05)
@@ -112,7 +120,7 @@ def main():
     args=ap.parse_args()
     if args.mode=='evaluate' and args.checkpoint is None:ap.error('Evaluate requires --checkpoint')
     if (args.seconds<=0 or args.episodes<1 or args.rollout_steps<1
-            or args.eval_every<1):ap.error('Invalid training horizon')
+            or args.eval_every<1 or args.plot_every<1):ap.error('Invalid training horizon')
     if args.output.exists() and any(args.output.iterdir()):
         ap.error('Output folder must be empty; old results are protected')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -150,18 +158,30 @@ def main():
     if args.mode=='evaluate':
         controllers=CONTROLLERS[:2]
         outcomes=[]
+        plotted_logs={}
         for controller in controllers:
             a=make_agent(args)
             logs,updates,summary=run(env,a,args,controller,train=False)
             outcomes.append(save_run(args.output,controller,logs,updates,summary))
+            plotted_logs[controller]=logs
+            if not args.no_plots:
+                plot_trajectory(logs,args.output/f'{controller}_trajectory.png',
+                                f'EVALUATE {controller}: XY tracking')
+                plot_cte(logs,args.output/f'{controller}_cte_response.png',
+                         f'EVALUATE {controller}: CTE')
+                plot_weights(logs,args.output/f'{controller}_weights_qrqf.png',
+                             f'EVALUATE {controller}: Q / R / Qf')
         pd.DataFrame(outcomes).to_csv(args.output/'comparison.csv',index=False)
+        if not args.no_plots:
+            plot_profile_overlay('evaluation',plotted_logs,args.output)
         print(pd.DataFrame(outcomes).to_string(index=False))
         return
 
     train_controller={'critic':'direct_p_critic_only','actor':'direct_p_actor_only',
                       'both':'direct_p_both'}[args.train_component]
     history=[]
-    for ep in range(2 if args.mode=='smoke' else args.episodes):
+    total_episodes = 2 if args.mode=='smoke' else args.episodes
+    for ep in range(total_episodes):
         logs,updates,summary=run(env,agent,args,train_controller,train=True)
         save_run(args.output,f'episode_{ep:04d}',logs,updates,summary)
         agent.save(args.output/'checkpoint.npz')
@@ -169,9 +189,14 @@ def main():
                                         if k!='final_p'},
                         **{f'p_final_{i}':p for i,p in enumerate(summary['final_p'])}})
         pd.DataFrame(history).to_csv(args.output/'training_history.csv',index=False)
+        # Plot AFTER saving CSV/checkpoint; plotting never changes NN/TD state.
+        if not args.no_plots and (ep==0 or (ep+1)%args.plot_every==0 or ep==total_episodes-1):
+            plot_training_history(pd.DataFrame(history),args.output)
+            plot_training_episode(args.output,ep,logs,updates)
         print(json.dumps(history[-1]),flush=True)
         if ep==0 or (ep+1)%args.eval_every==0 or ep==args.episodes-1:
             rows=[]
+            validation_logs={}
             for controller in ('fixed_nmpc','direct_p_frozen'):
                 fresh=make_agent(args)
                 # current policy snapshot for deterministic evaluation at this episode
@@ -179,7 +204,13 @@ def main():
                 fresh.critic.p=[x.copy() for x in agent.critic.p]
                 log,upd,m=run(env,fresh,args,controller,train=False)
                 rows.append(save_run(args.output,f'validation_ep{ep:04d}_{controller}',log,upd,m))
+                validation_logs[controller]=log
             pd.DataFrame(rows).to_csv(args.output/f'validation_ep{ep:04d}.csv',index=False)
+            if not args.no_plots:
+                plot_profile_overlay(f'validation_ep{ep:04d}',validation_logs,args.output/'plots')
+                for controller,log in validation_logs.items():
+                    plot_weights(log,args.output/'plots'/f'validation_ep{ep:04d}_{controller}_weights_qrqf.png',
+                                 f'Validation ep{ep:04d}: {controller} Q / R / Qf')
 
 if __name__=='__main__':
     main()
