@@ -20,6 +20,8 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Paper reward TD actor objective and admissible projection
         run: python -m unittest -v test_rl_paper_core
+      - name: Independent Gaussian Actor and analytical vs numerical gradients
+        run: python -m unittest -v test_gaussian_weight_actor
       - name: Six-parameter direct TD critic and NMPC weight bridge
         run: python -m unittest -v test_direct_p_critic
       - name: Existing vehicle and NMPC baseline tests
