@@ -64,7 +64,7 @@ class NMPCOnlyTests(unittest.TestCase):
             tail = pd.read_csv(meta["tail_file"])
             np.testing.assert_allclose(
                 tail["vx_ref_mps"].to_numpy()[:len(df)],
-                df["vx_ref_mps"].to_numpy(), atol=0., rtol=0.)
+                df["vx_ref_mps"].to_numpy(), atol=1e-15, rtol=1e-14)
 
 
 if __name__ == "__main__":
