@@ -25,17 +25,17 @@ TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
 TRAIN_CSV_SOURCE = None
 
 # Keep strictly away from TEST until all training decisions are fixed.
-EPISODES = 100
+EPISODES = 10
 STEPS_PER_EPISODE = 1150
-CHECKPOINT_EPISODES = (1, 10, 25, 50, 100)
+CHECKPOINT_EPISODES = (1, 5, 10)
 GAMMA = 0.90
 SEED = 0
 INITIAL_EY_M = .05
 INITIAL_HEADING_DEG = 0.
 
-# First comparison deliberately retains prior pilot's optimizer scales.
+# Gamma .90 pilot: change Critic Qf update rates ONLY. Actor is frozen\n# in learning-rate *settings*, NOT frozen NN weights; it keeps training.
 ACTOR_LR = 1e-6
-CRITIC_LR = 1e-3
+CRITIC_LR = 1e-2
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].
@@ -43,12 +43,13 @@ CRITIC_LR = 1e-3
 # and their contributions to the shared hidden layers.
 # CRITIC order: Qf=P[vx,vy,psi,r,X,Y]; direct six-parameter TD updates.
 #
-# Start with ones to reproduce the 100-episode baseline exactly.
-# Measure statewise TD*e_i**2 and output score-gradient RMS on TRAIN
-# before experimenting with non-unit values. Changes require a NEW
-# empty results/images folder and explicit scientific comparison.
+# Nonuniform Critic rates below are an exploratory 10-episode ablation.
+# They are NOT certified safe/optimal; compare with the previous 100-ep
+# baseline and check NMPC solver success, return, relative Qf changes.
+# Keep Actor factors as one to isolate the Critic learning-rate change.
+# Results/images must be empty, preserving your previous experiment.
 ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1., 1., 1., 1.)
-CRITIC_P_LR_FACTORS = (1., 1., 1., 1., 1., 1.)
+CRITIC_P_LR_FACTORS = (1.23, 0.86, 0.25, 0.41, 1.84, 1.85)
 SIGMA_MIN = .02
 SIGMA_INIT = .10
 SIGMA_MAX = .30
