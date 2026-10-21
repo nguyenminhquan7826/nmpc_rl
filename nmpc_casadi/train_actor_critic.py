@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from best_episode_selection import select_best_train_episode
 import numpy as np
 import pandas as pd
 
@@ -268,6 +269,7 @@ def main(argv=None):
     }
     (out/"run_config.json").write_text(json.dumps(meta,indent=2),encoding="utf-8")
     history=[]
+    best_train_index=None
     for ep in range(args.episodes):
         obs=env.reset()
         rows=[]
@@ -365,6 +367,35 @@ def main(argv=None):
         record["sigma_mean_episode"]=float(df["sigma_mean"].mean())
         record["qf_step_total"]=float(df["critic_param_step_norm"].sum())
         history.append(record)
+        best=select_best_train_episode(history)
+        record["is_best_train_so_far"]=bool(
+            best is not None and best["episode"]==ep and best_train_index!=ep)
+        # Save both the exact post-episode network and its stochastic
+        # TRAIN trace immediately; later updates would destroy this policy.
+        if best is not None and int(best["episode"])!=best_train_index:
+            best_train_index=int(best["episode"])
+            ckpt_tmp=out/"checkpoint_best_train.tmp.npz"
+            write_checkpoint(ckpt_tmp,actor,critic,{
+                **meta,"checkpoint_episode":ep,
+                "selection_role":"best_completed_stochastic_TRAIN_episode"})
+            ckpt_tmp.replace(out/"checkpoint_best_train.npz")
+            trace_tmp=out/"episode_best_train.tmp.csv"
+            df.to_csv(trace_tmp,index=False)
+            trace_tmp.replace(out/"episode_best_train.csv")
+            selection={
+                "type":"BEST_STOCHASTIC_TRAIN",
+                "episode_1based":ep+1,
+                "criterion":"reached_end_and_solver_success_at_least_99_pct_then_min_mean_cte_m",
+                "mean_cte_m":float(record["mean_cte_m"]),
+                "mean_reward_paper":float(record["mean_reward"]),
+                "solver_success_pct":float(record["solver_success_pct"]),
+                "reached_end":True,
+                "source":"TRAIN_ONLY",
+                "not_frozen_evaluation":True,
+            }
+            select_tmp=out/"best_train_selection.tmp.json"
+            select_tmp.write_text(json.dumps(selection,indent=2),encoding="utf-8")
+            select_tmp.replace(out/"best_train_selection.json")
         pd.DataFrame(history).to_csv(out/"training_history.csv",index=False)
         if args.save_at is None or (ep+1) in args.save_at:
             write_checkpoint(out/f"checkpoint_ep{ep:04d}.npz",actor,critic,
