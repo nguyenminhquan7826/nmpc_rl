@@ -25,19 +25,22 @@ class MinimalLayoutTests(unittest.TestCase):
         self.assertNotIn("--screen-manifest",args)
         self.assertNotIn("--reward-audit-summary",args)
         self.assertEqual(args[args.index("--gamma")+1],"0.9")
-        self.assertEqual(args[args.index("--episodes")+1],"10")
-        self.assertEqual(args[-3:],["1","5","10"])
-        self.assertEqual(args[args.index("--critic-lr")+1],"0.01")
+        self.assertEqual(args[args.index("--episodes")+1],"100")
+        self.assertEqual(args[-5:],["1","10","25","50","100"])
+        self.assertEqual(args[args.index("--critic-lr")+1],"0.0001")
+        self.assertEqual(args[args.index("--solver-failure-penalty")+1],"10.0")
+        self.assertEqual(args[args.index("--failure-terminal-penalty")+1],"100.0")
+        self.assertEqual(args[args.index("--actor-mu-reg-coef")+1],"0.001")
         self.assertEqual(args[args.index("--critic-component-scales")+1:args.index("--episodes")],
                          [str(x) for x in cfg.CRITIC_P_LR_FACTORS])
 
     def test_layout_has_only_two_new_output_roots_and_pinned_source(self):
         self.assertEqual(cfg.TRAIN_CSV.parent,cfg.TRAJECTORY_DIR)
-        self.assertEqual(cfg.RESULTS_DIR.name,"results")
-        self.assertEqual(cfg.IMAGES_DIR.name,"images")
+        self.assertEqual(cfg.RESULTS_DIR.name,"results_v3_D_penalty")
+        self.assertEqual(cfg.IMAGES_DIR.name,"images_v3_D_penalty")
         self.assertEqual(cfg.GAMMA,.9)
-        self.assertEqual(cfg.EPISODES,10)
-        self.assertEqual(cfg.CHECKPOINT_EPISODES,(1,5,10))
+        self.assertEqual(cfg.EPISODES,100)
+        self.assertEqual(cfg.CHECKPOINT_EPISODES,(1,10,25,50,100))
 
     def test_fixed_actor_preserves_qr_and_cannot_sample(self):
         q,r,_=LEARNING_INITIAL.arrays()
