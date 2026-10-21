@@ -133,6 +133,10 @@ def frozen_rollout(env,actor,critic,gamma,case_label):
         row={
             "controller":case_label,
             "t_s":float((len(rows))*b.Ts),
+            "X_m":float(obs.physical[4]),
+            "Y_m":float(obs.physical[5]),
+            "X_ref_m":float(obs.reference["xref"][0][4]),
+            "Y_ref_m":float(obs.reference["xref"][0][5]),
             "s_progress_m":initial_progress,
             "cross_track_m":cte,
             "e_psi":heading,"e_vx":vx_err,
