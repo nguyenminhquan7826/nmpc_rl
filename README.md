@@ -148,8 +148,8 @@ The user-requested, source-configured **one-command** workflow is now
 python run_experiment.py
 ```
 
-Edit `experiment_config.py` to change 100 episodes, `gamma=.90`,
-learning rates, exploration sigma, checkpoint intervals and the
+Current `experiment_config.py` selects a **10-episode gamma=.90 isolated Critic-Qf learning-rate pilot**,
+with frozen checkpoints at episodes 1, 5, 10. Edit it to change\nlearning rates, exploration sigma, checkpoint intervals and the
 three paths. The runner requires ONLY the pinned existing
 `reference_split/train_xref.csv` and writes flat numerical files
 to `results/` and real vehicle tracking / Q-R-Qf figures to
