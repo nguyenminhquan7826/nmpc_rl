@@ -77,6 +77,11 @@ def _validate_config():
             raise FileExistsError(
                 f"Existing {dirpath} is not empty. Preserve prior experiment. "
                 "Move it to an archive or change the root path IN experiment_config.py")
+    for name,n in (("ACTOR_OUTPUT_LR_FACTORS",8),("CRITIC_P_LR_FACTORS",6)):
+        factors=np.asarray(getattr(cfg,name),dtype=float)
+        if (factors.shape!=(n,) or not np.all(np.isfinite(factors))
+            or np.any(factors<=0)):
+            raise ValueError(f"{name} must contain {n} positive finite entries")
     if not cfg.EVALUATE_SAME_TRAIN_TRACK:
         raise ValueError("This run requires a frozen evaluation to compare learning")
     if cfg.REWARD_CANDIDATE!="legacy":
@@ -101,6 +106,8 @@ def train_argv(checkpoints):
         "--sigma-upper",str(cfg.SIGMA_MAX),
         "--actor-lr",str(cfg.ACTOR_LR),
         "--critic-lr",str(cfg.CRITIC_LR),
+        "--actor-output-scales",*(str(x) for x in cfg.ACTOR_OUTPUT_LR_FACTORS),
+        "--critic-component-scales",*(str(x) for x in cfg.CRITIC_P_LR_FACTORS),
         "--episodes",str(cfg.EPISODES),
         "--steps-per-episode",str(cfg.STEPS_PER_EPISODE),
         "--seed",str(cfg.SEED),
@@ -181,6 +188,8 @@ def main():
         "status":"TRAIN_RUN_AND_FROZEN_EVALUATION_COMPLETE",
         "data_role":"TRAIN_ONLY","train_sha256":digest,
         "gamma":cfg.GAMMA, "episodes":cfg.EPISODES,
+        "actor_output_lr_factors":list(cfg.ACTOR_OUTPUT_LR_FACTORS),
+        "critic_p_lr_factors":list(cfg.CRITIC_P_LR_FACTORS),
         "checkpoints_1based":list(checkpoints),
         "fixed_reward_Qe":Q_EVAL_CANDIDATE.tolist(),
         "fixed_reward_Re":R_EVAL_CANDIDATE.tolist(),
