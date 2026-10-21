@@ -40,7 +40,7 @@ def reward_diagnostics(df, *, gamma, p_initial=None, q_eval=None, r_eval=None):
     missing=[n for n in needed if n not in df]
     if missing:
         raise ValueError("Missing full-state error or actual control increments: "+",".join(missing))
-    e=df[[f"e_{n}" for n in STATE]].to_numpy(float)
+    e=df[[f"e_{n}" for n in STATE]].to_numpy(dtype=float,copy=True)
     e[:,2]=np.arctan2(np.sin(e[:,2]),np.cos(e[:,2]))
     du=df[["du_a","du_delta"]].to_numpy(float)
     reward = np.asarray(paper_reward(e,du,qe,re),float)
