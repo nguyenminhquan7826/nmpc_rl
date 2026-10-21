@@ -16,9 +16,9 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v3_D_penalty"
-IMAGES_DIR = BASE_DIR / "images_v3_D_penalty"
-TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
+RESULTS_DIR = BASE_DIR / "results_v6"
+IMAGES_DIR = BASE_DIR / "images_v6"
+TRAIN_CSV = TRAJECTORY_DIR / "test_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
 # TRAIN_CSV_SOURCE = Path(r"D:\\your\\old\\project\\reference_split\\train_xref.csv")
@@ -35,8 +35,8 @@ INITIAL_HEADING_DEG = 0.
 
 # Experiment D: v3-matched 100 episodes, margin and optimizer rates.
 # The two TRAIN-only penalties are exploratory; no stability certificate.
-ACTOR_LR = 1e-4
-CRITIC_LR = 1e-4
+ACTOR_LR = 1e-5
+CRITIC_LR = 1
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].
@@ -46,8 +46,8 @@ CRITIC_LR = 1e-4
 #
 # Keep per-component factors identical to the completed v3 run.
 # Outputs must be new empty directories; historical v3 results stay intact.
-ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 2.5, 2.5, 1., 1.)
-CRITIC_P_LR_FACTORS = (1.23, 0.86, 0.25, 0.41, 2.5, 2.5)
+ACTOR_OUTPUT_LR_FACTORS = (1., 1., 0.5, 0.5, 1, 1, 0.5, 0.5)
+CRITIC_P_LR_FACTORS = (0.5, 0.5, 0.1, 0.2, 1, 1)
 SIGMA_MIN = .02
 SIGMA_INIT = .10
 SIGMA_MAX = .30
