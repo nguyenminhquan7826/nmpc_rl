@@ -16,9 +16,9 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v4"
-IMAGES_DIR = BASE_DIR / "images_v4"
-TRAIN_CSV = TRAJECTORY_DIR / "test_xref.csv"
+RESULTS_DIR = BASE_DIR / "results"
+IMAGES_DIR = BASE_DIR / "images"
+TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
 # TRAIN_CSV_SOURCE = Path(r"D:\\your\\old\\project\\reference_split\\train_xref.csv")
@@ -35,8 +35,8 @@ INITIAL_HEADING_DEG = 0.
 
 # Gamma .90 pilot: change Critic Qf update rates ONLY. Actor is frozen
 # in learning-rate *settings*, NOT frozen NN weights; it keeps training.
-ACTOR_LR = 3e-4
-CRITIC_LR = 3e-4
+ACTOR_LR = 1e-6
+CRITIC_LR = 1e-2
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].
@@ -49,8 +49,8 @@ CRITIC_LR = 3e-4
 # baseline and check NMPC solver success, return, relative Qf changes.
 # Keep Actor factors as one to isolate the Critic learning-rate change.
 # Results/images must be empty, preserving your previous experiment.
-ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1.5, 1.5, 1., 1.)
-CRITIC_P_LR_FACTORS = (1., 1., 1., 1., 1.5, 1.5)
+ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1., 1., 1., 1.)
+CRITIC_P_LR_FACTORS = (1.23, 0.86, 0.25, 0.41, 1.84, 1.85)
 SIGMA_MIN = .02
 SIGMA_INIT = .10
 SIGMA_MAX = .30
