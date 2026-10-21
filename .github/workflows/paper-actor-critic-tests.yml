@@ -26,6 +26,8 @@ jobs:
         run: python -m unittest -v test_direct_p_critic
       - name: Approved training start and pinned TRAIN-only screening tests
         run: python -m unittest -v test_screen_training_weights
+      - name: Fixed paper reward audit and one-transition joint training contract
+        run: python -m unittest -v test_actor_critic_training
       - name: Existing vehicle and NMPC baseline tests
         run: python -m unittest -v test_nmpc_core
       - name: Standalone baseline NMPC still works
