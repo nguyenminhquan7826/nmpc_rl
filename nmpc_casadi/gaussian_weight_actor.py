@@ -45,6 +45,20 @@ def _scalar(value, name):
 def _sigmoid(z):
     return 0.5 * (1. + np.tanh(0.5 * z))
 
+def actor_mu_excess_squared(mu, threshold):
+    """Unweighted sum of squared latent-mean excess, per observation.
+
+    Kept separate from the Eq.(4) environment reward. For batch means,
+    report np.mean(actor_mu_excess_squared(mu, threshold)).
+    """
+    a = np.asarray(mu, dtype=float)
+    if a.shape[-1:] != (WEIGHT_DIM,) or not np.all(np.isfinite(a)):
+        raise ValueError("mu must end in eight finite Actor coordinates")
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("mu regularization threshold must be positive finite")
+    return np.sum(np.maximum(np.abs(a)-float(threshold),0.0)**2,axis=-1)
+
+
 
 def build_actor_observation(
     state, reference_state, previous_control, *,
@@ -214,7 +228,9 @@ class GaussianWeightActor:
                                               mu[None,:], sigma[None,:])[0]))
 
     def loss_and_gradients(self, observations, sampled_latents, frozen_td,
-                           *, output_gradient_scale=None):
+                           *, output_gradient_scale=None,
+                           mu_regularization_coef=0.0,
+                           mu_regularization_threshold=2.0):
         """TD score-function gradient, optionally preconditioned per output.
 
         Original scalar diagnostic loss remains Eq.(8):
@@ -228,6 +244,9 @@ class GaussianWeightActor:
         actor loss when factors differ from one. Neither Q/R physical
         values nor fixed reward are multiplied.
         No gradients pass through squash/NMPC/reparameterized sampling.
+        Optional mu regularization adds lambda * mean(sum(positive_part(
+        abs(mu)-threshold)**2)) to the actor loss. It DOES NOT receive
+        per-output score-gradient multipliers, and changes Eq.(8).
         """
         obs, _ = self._batch(observations)
         z = np.asarray(sampled_latents, dtype=float)
@@ -244,11 +263,24 @@ class GaussianWeightActor:
                 not np.all(np.isfinite(factors)) or np.any(factors<=0)):
                 raise ValueError(
                     "output_gradient_scale must have exactly 8 positive finite entries")
+        if (not np.isfinite(mu_regularization_coef) or
+            mu_regularization_coef < 0 or
+            not np.isfinite(mu_regularization_threshold) or
+            mu_regularization_threshold <= 0):
+            raise ValueError("mu regularization coefficient must be nonnegative, threshold positive")
         mu, sigma, (h1, h2, frac) = self._forward(obs)
         loss = -float(np.mean(td * self._logp(z, mu, sigma)))
         d = z - mu
         inv = 1. / sigma
         dmu = -(td[:,None] / n) * d * inv**2 * factors[None,:]
+        # Only the score-function gradient is per-head preconditioned.
+        # A separate differentiable penalty stops |mu| from exploding
+        # outside the useful tanh slope; it still backprops through W_mu,
+        # b_mu and the shared two hidden layers. It is NOT an NMPC gradient.
+        if mu_regularization_coef > 0:
+            excess=np.maximum(np.abs(mu)-mu_regularization_threshold,0.)
+            loss+=float(mu_regularization_coef*np.mean(np.sum(excess**2,axis=1)))
+            dmu += (2.*float(mu_regularization_coef)/n)*np.sign(mu)*excess
         dlogp_dsigma = (d**2 * inv**2 - 1.) * inv
         draw = -(td[:,None] / n) * dlogp_dsigma * (
             (self.sigma_upper - self.sigma_lower) * frac * (1. - frac)
