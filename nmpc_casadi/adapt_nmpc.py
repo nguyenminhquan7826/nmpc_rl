@@ -9,13 +9,153 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rl_nmpc as rl
+from cad_eval_reference import prepare_cad_evaluation_reference
+from ac_ablation import learn_selected_component, net_unchanged, snapshot_net, net_parameter_change_norm
+from qfpsi_isolation import install_pretrained_qfpsi_function, verify_frozen_qfpsi
+from heldout_reference import (
+    HELDOUT_ID, HELDOUT_CURVATURE_FORMULA,
+    compare_geometry, describe_geometry,
+    generate_heldout_s_bend, sha256_file,
+)
 
 
-CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_online')
+CONTROLLERS = ('fixed_nmpc', 'ac_nmpc_frozen', 'ac_nmpc_online')
+FROZEN_DETERMINISTIC = 'ac_nmpc_frozen_deterministic'
+ABLATION_MODES = {'ac_nmpc_actor_only': 'actor', 'ac_nmpc_critic_only': 'critic'}
+QFPSI_HOLD_MODES = {
+    'ac_nmpc_critic_qfpsi_held': 'critic',
+    'ac_nmpc_online_qfpsi_held': 'both',
+}
 DISPLAY = {
     'fixed_nmpc': 'Fixed NMPC',
+    'ac_nmpc_frozen': 'Frozen AC-NMPC (sampled)',
+    'ac_nmpc_frozen_deterministic': 'Frozen AC-NMPC (mean)',
     'ac_nmpc_online': 'Online AC-NMPC',
+    'ac_nmpc_actor_only': 'Online Actor-only',
+    'ac_nmpc_critic_only': 'Online Critic-only',
+    'ac_nmpc_critic_qfpsi_held': 'Critic-only, Qf_psi held',
+    'ac_nmpc_online_qfpsi_held': 'Online both, Qf_psi held',
 }
+
+
+def active_controllers(include_frozen_deterministic=False, include_ablation=False,
+                       isolate_qfpsi=False):
+    """Default roster unchanged; optional Qf_psi(s) causal intervention."""
+    if isolate_qfpsi and not include_ablation:
+        raise ValueError('Qf_psi isolation requires --ablation-components')
+    if not include_ablation:
+        if include_frozen_deterministic:
+            return ('fixed_nmpc', 'ac_nmpc_frozen',
+                    FROZEN_DETERMINISTIC, 'ac_nmpc_online')
+        return CONTROLLERS
+    order = ['fixed_nmpc', 'ac_nmpc_frozen']
+    if include_frozen_deterministic:
+        order.append(FROZEN_DETERMINISTIC)
+    order.extend(ABLATION_MODES)
+    if isolate_qfpsi:
+        order.append('ac_nmpc_critic_qfpsi_held')
+    order.append('ac_nmpc_online')
+    if isolate_qfpsi:
+        order.append('ac_nmpc_online_qfpsi_held')
+    return tuple(order)
+
+
+
+# Capture immutable training-reference identity BEFORE the evaluation-only path
+# is installed. Never alter the original source CSV or pretrained checkpoint.
+TRAINING_REF_SOURCE = Path(rl.b.REF_SOURCE)
+TRAINING_LENGTH_M = float(rl.b.CAD_S_END)
+
+
+def install_evaluation_track(output, track, track_csv=None):
+    """Switch only the running evaluator's ReferenceManager source.
+
+    No changes to rl_nmpc.py, baseline.py, training trajectory or checkpoint.
+    Every controller re-instantiates the same reference via Environment.reset.
+    """
+    if track_csv is not None:
+        # An evaluator must not relabel a training reference as held-out.
+        # Neither training CSV is modified.
+        custom_source = Path(track_csv).expanduser().resolve(strict=True)
+        training_candidates = [
+            rl.b.BASE / 'xref_states_smoothed.csv',
+            rl.b.BASE / 'xref_states_controller.csv',
+        ]
+        for candidate in training_candidates:
+            if candidate.exists() and (
+                custom_source == candidate.resolve()
+                or sha256_file(custom_source) == sha256_file(candidate)
+            ):
+                raise ValueError(
+                    'Refusing to evaluate a training CAD source with --track-csv: '
+                    + str(candidate)
+                )
+        ref_info, info = prepare_cad_evaluation_reference(
+            custom_source, Path(output), rl.b.TAIL_LENGTH_M,
+            min_speed_mps=float(rl.b.cfg['vx_min']),
+            max_speed_mps=min(float(rl.b.TEST_SPEED_MPS),
+                              float(rl.b.cfg['vx_max'])),
+            wheelbase_m=float(rl.b.WHEELBASE_M),
+            steering_limit_rad=float(min(
+                abs(rl.b.cfg['u_min'][1]), abs(rl.b.cfg['u_max'][1]))),
+        )
+        rl.b.TAIL_FILE = Path(info['tail_file'])
+        rl.b.REF_INFO = ref_info
+        rl.b.CAD_S_END = float(ref_info['cad_s_end'])
+        info['note'] = (
+            'Independent user-supplied CAD reference for evaluation only. '
+            'Training and checkpoint sources remain unchanged.'
+        )
+    elif track == 'training':
+        # Explicit legacy replay. Not an out-of-distribution generalization test.
+        info = {
+            'id': 'training_original',
+            'held_out': False,
+            'reference_file': str(TRAINING_REF_SOURCE),
+            'reference_sha256': sha256_file(TRAINING_REF_SOURCE),
+            'reference_length_m': float(rl.b.CAD_S_END),
+            'note': 'Legacy in-distribution replay, NOT evidence of unseen-path generalization',
+        }
+    elif track == 'heldout_s_bend':
+        path = Path(output) / f'{HELDOUT_ID}_reference.csv'
+        tail_path = Path(output) / f'{HELDOUT_ID}_with_virtual_tail.csv'
+        data = generate_heldout_s_bend(
+            path, length_m=TRAINING_LENGTH_M,
+            speed_mps=rl.b.TEST_SPEED_MPS,
+        )
+        diff = compare_geometry(TRAINING_REF_SOURCE, data)
+        # Baseline generates a virtual horizon-only tail and records the REAL
+        # path length separately. Only these runtime b.* values are switched.
+        ref_info = rl.b.prepare_reference_with_tail(
+            path, tail_path, rl.b.TAIL_LENGTH_M
+        )
+        rl.b.TAIL_FILE = tail_path
+        rl.b.REF_INFO = ref_info
+        rl.b.CAD_S_END = float(ref_info['cad_s_end'])
+        if not np.isclose(rl.b.CAD_S_END, TRAINING_LENGTH_M, atol=1e-8):
+            raise RuntimeError('Heldout geometry changed the task path length')
+        info = {
+            'id': HELDOUT_ID,
+            'held_out': True,
+            'not_used_for_training_or_checkpoint_selection': True,
+            'source_geometry': 'independent analytic curvature integration',
+            'curvature_formula': HELDOUT_CURVATURE_FORMULA,
+            'reference_file': str(path),
+            'reference_sha256': sha256_file(path),
+            'tail_file': str(tail_path),
+            'tail_sha256': sha256_file(tail_path),
+            'geometry': describe_geometry(data),
+            'difference_vs_training': diff,
+        }
+    else:
+        raise ValueError(f'Unknown evaluation track: {track}')
+    info['training_reference_file'] = str(TRAINING_REF_SOURCE)
+    info['training_reference_sha256'] = sha256_file(TRAINING_REF_SOURCE)
+    info['training_reference_length_m'] = TRAINING_LENGTH_M
+    (Path(output) / 'reference_manifest.json').write_text(
+        json.dumps(info, indent=2, ensure_ascii=False), encoding='utf-8'
+    )
+    return info
 
 
 def fresh_agent(args, meta):
@@ -293,8 +433,27 @@ def run_fixed_nmpc(env, args, scenario):
     return m
 
 
-def run_ac_nmpc_online(env, agent, args, scenario):
-    """Pretrained Actor-Critic inference + online Actor/Critic network updates."""
+def run_ac_nmpc_online(env, agent, args, scenario, *,
+                       train_component='both', controller_label='ac_nmpc_online',
+                       hold_qfpsi=False):
+    """Sampled AC-NMPC with selective learning and optional functional Qf_psi hold."""
+    if train_component not in ('both', 'actor', 'critic'):
+        raise ValueError('Unknown online ablation mode')
+    if hold_qfpsi:
+        expected = next(
+            (key for key, value in QFPSI_HOLD_MODES.items()
+             if value == train_component), None,
+        )
+        if expected is None:
+            raise ValueError('Qf_psi hold only supported with Critic learning')
+    else:
+        expected = ('ac_nmpc_online' if train_component == 'both'
+                    else next(k for k, v in ABLATION_MODES.items()
+                              if v == train_component))
+    if controller_label != expected:
+        raise ValueError('Controller label/mode mismatch')
+    initial_actor = snapshot_net(agent.actor)
+    initial_critic = snapshot_net(agent.critic)
     name = scenario['name']
     ey = float(scenario['ey'])
     heading = float(scenario['heading'])
@@ -304,13 +463,23 @@ def run_ac_nmpc_online(env, agent, args, scenario):
     original_propose = agent.propose
     original_step = env.step
 
+    # Qf_psi(s) is masked at the FUNCTION level using an immutable pretrained
+    # critic. Freezing only its output-layer column would not suffice when
+    # shared hidden layers continue to change.
+    original_terms = None
+    frozen_qfpsi = None
+    if hold_qfpsi:
+        original_terms, frozen_qfpsi = install_pretrained_qfpsi_function(agent)
+
     learn_call_times = []
     propose_timing = []
     step_timing = []
 
     def timed_learn(rows):
         start = time.perf_counter_ns()
-        result = original_learn(rows)
+        result = learn_selected_component(
+            agent, rows, train_component, learn_fn=original_learn,
+        )
         elapsed = (time.perf_counter_ns() - start) / 1e6
         learn_call_times.append(elapsed)
         return {**result, 'learn_ms': elapsed}
@@ -318,6 +487,8 @@ def run_ac_nmpc_online(env, agent, args, scenario):
     def timed_propose(*a, **kw):
         start = time.perf_counter_ns()
         result = original_propose(*a, **kw)
+        if hold_qfpsi:
+            verify_frozen_qfpsi(result[0], float(frozen_qfpsi(a[0])))
         propose_timing.append((time.perf_counter_ns() - start) / 1e6)
         return result
 
@@ -355,6 +526,8 @@ def run_ac_nmpc_online(env, agent, args, scenario):
         agent.learn = original_learn
         agent.propose = original_propose
         env.step = original_step
+        if hold_qfpsi:
+            agent.critic_terms = original_terms
     wall_ms = (time.perf_counter_ns() - wall_start) / 1e6
 
     logs = pd.DataFrame(env.logs)
@@ -377,72 +550,311 @@ def run_ac_nmpc_online(env, agent, args, scenario):
         logs.loc[k:, 'updates_before_action'] += 1
 
     logs = _finalize_timing(logs, propose_timing=propose_timing, learn_timing_by_step=learn_by_step)
-    logs.to_csv(args.output / f'{name}_ac_nmpc_online.csv', index=False)
+    logs.to_csv(args.output / f'{name}_{controller_label}.csv', index=False)
 
-    pd.DataFrame(updates).to_csv(args.output / f'{name}_ac_updates.csv', index=False)
-    agent.save(args.output / f'{name}_ac_adapted_checkpoint.npz')
+    # Preserve legacy output filenames for the original Online condition.
+    if train_component == 'both':
+        update_name = f'{name}_ac_updates.csv'
+        checkpoint_name = f'{name}_ac_adapted_checkpoint.npz'
+    else:
+        update_name = f'{name}_{controller_label}_updates.csv'
+        checkpoint_name = f'{name}_{controller_label}_adapted_checkpoint.npz'
+    pd.DataFrame(updates).to_csv(args.output / update_name, index=False)
+    # Critical: the held-head arm is a two-network inference composition.
+    # Saving a plain Agent checkpoint would NOT preserve that held function,
+    # so do not issue a misleading standalone adapted checkpoint.
+    if not hold_qfpsi:
+        agent.save(args.output / checkpoint_name)
+    unchanged_actor = net_unchanged(agent.actor, initial_actor)
+    unchanged_critic = net_unchanged(agent.critic, initial_critic)
+    if train_component == 'actor' and not unchanged_critic:
+        raise RuntimeError('Actor-only changed pretrained Critic parameters or Adam state')
+    if train_component == 'critic' and not unchanged_actor:
+        raise RuntimeError('Critic-only changed pretrained Actor parameters or Adam state')
 
     m.update(
         scenario=name,
         plant_profile=profile,
-        controller='ac_nmpc_online',
+        controller=controller_label,
+        train_component=train_component,
+        qfpsi_function_held_at_checkpoint=bool(hold_qfpsi),
+        adapted_checkpoint_saved=not bool(hold_qfpsi),
+        actor_unchanged_from_checkpoint=unchanged_actor,
+        critic_unchanged_from_checkpoint=unchanged_critic,
+        actor_parameter_change_norm=net_parameter_change_norm(
+            agent.actor, initial_actor,
+        ),
+        critic_parameter_change_norm=net_parameter_change_norm(
+            agent.critic, initial_critic,
+        ),
         updates=len(updates),
         **_timing_metrics(logs, wall_ms, learn_call_times),
     )
     return m
 
 
+def snapshot_network_state(agent):
+    """Exact parameters and Adam moments/step counters; RNG intentionally excluded."""
+    return {
+        name: {
+            'p': [arr.copy() for arr in getattr(agent, name).p],
+            'm': [arr.copy() for arr in getattr(agent, name).m],
+            'v': [arr.copy() for arr in getattr(agent, name).v],
+            't': getattr(agent, name).t,
+        }
+        for name in ('actor', 'critic')
+    }
+
+
+def network_state_unchanged(agent, saved):
+    """Frozen means that both policy parameters and optimizer states are unchanged."""
+    for name in ('actor', 'critic'):
+        net = getattr(agent, name)
+        old = saved[name]
+        if net.t != old['t']:
+            return False
+        for attr in ('p', 'm', 'v'):
+            arrays, previous = getattr(net, attr), old[attr]
+            if len(arrays) != len(previous):
+                return False
+            if any(not np.array_equal(x, y) for x, y in zip(arrays, previous)):
+                return False
+    return True
+
+
+def run_ac_nmpc_frozen(env, agent, args, scenario, deterministic=False):
+    """Run the same AC-NMPC feedback policy without a single network update.
+
+    Stochastic Frozen samples from agent.propose(s, explore=True), exactly as
+    Online does. Freshly loaded agents use the same RNG state; they draw the
+    same Gaussian noise per time step until their trajectories/weights diverge.
+    Deterministic Frozen (optional) uses explore=False.
+    """
+    name = scenario['name']
+    ey = float(scenario['ey'])
+    heading = float(scenario['heading'])
+    profile = scenario['profile']
+    label = FROZEN_DETERMINISTIC if deterministic else 'ac_nmpc_frozen'
+
+    saved = snapshot_network_state(agent)
+    propose_timing = []
+    step_timing = []
+    wall_start = time.perf_counter_ns()
+    s, _ = env.reset(ey, heading, rl.b.p_nominal.copy())
+    env.learning_updates = []
+    while True:
+        start = time.perf_counter_ns()
+        weights, _ = agent.propose(s, explore=not deterministic)
+        propose_timing.append((time.perf_counter_ns() - start) / 1e6)
+
+        # Same time-varying physical plant and nominal NMPC predictor as Online.
+        t_plant = float(env.k * rl.b.Ts)
+        p_plant = plant_for_profile(profile, t_plant, args)
+        env.plant = p_plant.copy()
+
+        start = time.perf_counter_ns()
+        sn, _, _, done, _ = env.step(weights)
+        step_timing.append((time.perf_counter_ns() - start) / 1e6)
+        _attach_plant_to_last_log(env, profile, p_plant)
+        s = sn
+        if done:
+            break
+    wall_ms = (time.perf_counter_ns() - wall_start) / 1e6
+
+    # Never call agent.learn, including at episode end. Assert all parameters
+    # AND optimizer states are bitwise unchanged.
+    if getattr(env, 'learning_updates', []):
+        raise RuntimeError(f'Frozen run unexpectedly updated networks: {name}')
+    if not network_state_unchanged(agent, saved):
+        raise RuntimeError(f'Frozen Actor/Critic or Adam state changed: {name}')
+
+    logs = pd.DataFrame(env.logs)
+    n = len(logs)
+    if len(propose_timing) != n or len(step_timing) != n:
+        raise RuntimeError(
+            f'Timing alignment failed for {name}/{label}: '
+            f'logs={n}, propose={len(propose_timing)}, step={len(step_timing)}'
+        )
+    logs['env_step_wall_ms'] = np.asarray(step_timing, dtype=float)
+    logs['updates_before_action'] = 0
+    logs = _finalize_timing(logs, propose_timing=propose_timing)
+    logs.to_csv(args.output / f'{name}_{label}.csv', index=False)
+
+    m = rl.metrics(env.logs)
+    m.update(
+        scenario=name, plant_profile=profile, controller=label, updates=0,
+        frozen_network_unchanged=True,
+        sampling_mode='deterministic_mean' if deterministic else 'sampled_gaussian',
+        **_timing_metrics(logs, wall_ms, []),
+    )
+    return m
+
+
+def _improve_lower(baseline, candidate, metric):
+    """Positive improvement percentage means candidate is better."""
+    bv = float(baseline[metric])
+    cv = float(candidate[metric])
+    if not np.isfinite(bv) or not np.isfinite(cv) or abs(bv) < 1e-12:
+        return np.nan
+    return 100.0 * (bv - cv) / abs(bv)
+
+
 def build_pairwise_summary(comparison):
-    """One row per scenario; positive tracking improvement means AC-NMPC is better."""
+    """One row per scenario, retaining historical Fixed-vs-Online columns."""
     rows = []
-    for scenario, d in comparison.groupby('scenario'):
-        idx = d.set_index('controller')
+    for scenario, group in comparison.groupby('scenario', sort=False):
+        idx = group.set_index('controller')
         if not set(CONTROLLERS).issubset(idx.index):
             continue
-        f = idx.loc['fixed_nmpc']
-        a = idx.loc['ac_nmpc_online']
-
-        def improve_lower(metric):
-            fv, av = float(f[metric]), float(a[metric])
-            if not np.isfinite(fv) or not np.isfinite(av) or abs(fv) < 1e-12:
-                return np.nan
-            return 100.0 * (fv - av) / abs(fv)
-
+        f, z, a = [idx.loc[name] for name in CONTROLLERS]
         rows.append({
             'scenario': scenario,
             'plant_profile': f['plant_profile'],
             'fixed_tracking_feasible': bool(f['tracking_feasible']),
+            'frozen_tracking_feasible': bool(z['tracking_feasible']),
             'ac_tracking_feasible': bool(a['tracking_feasible']),
             'fixed_mean_cte_post_m': float(f['mean_cte_post_m']),
+            'frozen_mean_cte_post_m': float(z['mean_cte_post_m']),
             'ac_mean_cte_post_m': float(a['mean_cte_post_m']),
-            'mean_cte_post_improvement_pct': improve_lower('mean_cte_post_m'),
+            'mean_cte_post_improvement_pct': _improve_lower(f, a, 'mean_cte_post_m'),
+            'frozen_vs_fixed_mean_cte_improvement_pct':
+                _improve_lower(f, z, 'mean_cte_post_m'),
+            'online_vs_frozen_mean_cte_improvement_pct':
+                _improve_lower(z, a, 'mean_cte_post_m'),
             'fixed_max_cte_post_m': float(f['max_cte_post_m']),
+            'frozen_max_cte_post_m': float(z['max_cte_post_m']),
             'ac_max_cte_post_m': float(a['max_cte_post_m']),
-            'max_cte_post_improvement_pct': improve_lower('max_cte_post_m'),
+            'max_cte_post_improvement_pct': _improve_lower(f, a, 'max_cte_post_m'),
+            'online_vs_frozen_max_cte_improvement_pct':
+                _improve_lower(z, a, 'max_cte_post_m'),
             'fixed_heading_rmse_post_rad': float(f['rmse_heading_post_rad']),
+            'frozen_heading_rmse_post_rad': float(z['rmse_heading_post_rad']),
             'ac_heading_rmse_post_rad': float(a['rmse_heading_post_rad']),
-            'heading_rmse_post_improvement_pct': improve_lower('rmse_heading_post_rad'),
+            'heading_rmse_post_improvement_pct':
+                _improve_lower(f, a, 'rmse_heading_post_rad'),
+            'online_vs_frozen_heading_rmse_improvement_pct':
+                _improve_lower(z, a, 'rmse_heading_post_rad'),
             'fixed_vx_rmse_post_mps': float(f['rmse_vx_post_mps']),
+            'frozen_vx_rmse_post_mps': float(z['rmse_vx_post_mps']),
             'ac_vx_rmse_post_mps': float(a['rmse_vx_post_mps']),
-            'vx_rmse_post_improvement_pct': improve_lower('rmse_vx_post_mps'),
+            'vx_rmse_post_improvement_pct': _improve_lower(f, a, 'rmse_vx_post_mps'),
+            'online_vs_frozen_vx_rmse_improvement_pct':
+                _improve_lower(z, a, 'rmse_vx_post_mps'),
             'fixed_solver_success_pct': float(f['solver_success_pct']),
+            'frozen_solver_success_pct': float(z['solver_success_pct']),
             'ac_solver_success_pct': float(a['solver_success_pct']),
-            'solver_success_delta_pctpoint': float(a['solver_success_pct'] - f['solver_success_pct']),
+            'solver_success_delta_pctpoint': float(
+                a['solver_success_pct'] - f['solver_success_pct']),
             'fixed_completion_pct': float(f['completion_pct']),
+            'frozen_completion_pct': float(z['completion_pct']),
             'ac_completion_pct': float(a['completion_pct']),
-            'completion_delta_pctpoint': float(a['completion_pct'] - f['completion_pct']),
+            'completion_delta_pctpoint': float(
+                a['completion_pct'] - f['completion_pct']),
             'fixed_return': float(f['return']),
+            'frozen_return': float(z['return']),
             'ac_return': float(a['return']),
             'return_delta': float(a['return'] - f['return']),
+            'online_vs_frozen_return_delta': float(a['return'] - z['return']),
             'fixed_control_step_mean_ms': float(f['control_step_total_mean_ms']),
+            'frozen_control_step_mean_ms': float(z['control_step_total_mean_ms']),
             'ac_control_step_mean_ms': float(a['control_step_total_mean_ms']),
             'ac_timing_overhead_mean_ms': float(
-                a['control_step_total_mean_ms'] - f['control_step_total_mean_ms']
-            ),
+                a['control_step_total_mean_ms'] - f['control_step_total_mean_ms']),
+            'online_vs_frozen_timing_overhead_mean_ms': float(
+                a['control_step_total_mean_ms'] - z['control_step_total_mean_ms']),
             'fixed_control_step_p99_ms': float(f['control_step_total_p99_ms']),
+            'frozen_control_step_p99_ms': float(z['control_step_total_p99_ms']),
             'ac_control_step_p99_ms': float(a['control_step_total_p99_ms']),
         })
     return pd.DataFrame(rows)
+
+
+def build_pairwise_long(comparison):
+    """Explicit pairwise contrasts including the frozen-learning effect."""
+    pairs = (
+        ('frozen_vs_fixed', 'ac_nmpc_frozen', 'fixed_nmpc'),
+        ('online_vs_frozen', 'ac_nmpc_online', 'ac_nmpc_frozen'),
+        ('online_vs_fixed', 'ac_nmpc_online', 'fixed_nmpc'),
+        ('frozen_mean_vs_sampled', FROZEN_DETERMINISTIC, 'ac_nmpc_frozen'),
+        ('actor_only_vs_frozen', 'ac_nmpc_actor_only', 'ac_nmpc_frozen'),
+        ('critic_only_vs_frozen', 'ac_nmpc_critic_only', 'ac_nmpc_frozen'),
+        ('both_vs_actor_only', 'ac_nmpc_online', 'ac_nmpc_actor_only'),
+        ('both_vs_critic_only', 'ac_nmpc_online', 'ac_nmpc_critic_only'),
+        ('qfpsi_hold_critic_vs_critic', 'ac_nmpc_critic_qfpsi_held',
+         'ac_nmpc_critic_only'),
+        ('qfpsi_hold_both_vs_both', 'ac_nmpc_online_qfpsi_held',
+         'ac_nmpc_online'),
+        ('qfpsi_hold_critic_vs_frozen', 'ac_nmpc_critic_qfpsi_held',
+         'ac_nmpc_frozen'),
+        ('qfpsi_hold_both_vs_frozen', 'ac_nmpc_online_qfpsi_held',
+         'ac_nmpc_frozen'),
+    )
+    rows = []
+    for scenario, group in comparison.groupby('scenario', sort=False):
+        idx = group.set_index('controller')
+        for name, candidate, baseline in pairs:
+            if candidate not in idx.index or baseline not in idx.index:
+                continue
+            a, b = idx.loc[candidate], idx.loc[baseline]
+            entry = {
+                'scenario': scenario,
+                'comparison': name,
+                'candidate': candidate,
+                'baseline': baseline,
+                'candidate_updates': int(a['updates']),
+                'baseline_updates': int(b['updates']),
+                'candidate_reached_end': bool(a['reached_end']),
+                'baseline_reached_end': bool(b['reached_end']),
+                'candidate_tracking_feasible': bool(a['tracking_feasible']),
+                'baseline_tracking_feasible': bool(b['tracking_feasible']),
+            }
+            for metric in ('mean_cte_post_m', 'max_cte_post_m',
+                           'rmse_heading_post_rad', 'rmse_vx_post_mps',
+                           'mean_du_delta_sq'):
+                entry[metric + '_improvement_pct'] = _improve_lower(b, a, metric)
+                entry[metric + '_delta'] = float(a[metric] - b[metric])
+            entry['return_delta'] = float(a['return'] - b['return'])
+            entry['completion_pct_delta'] = float(a['completion_pct'] - b['completion_pct'])
+            entry['control_step_mean_ms_delta'] = float(
+                a['control_step_total_mean_ms'] - b['control_step_total_mean_ms'])
+            rows.append(entry)
+    return pd.DataFrame(rows)
+
+
+def initial_sampled_pairing(output, scenario, rollout_steps):
+    """Check common action prefix before the first Online network update.
+
+    Both modes load the same checkpoint, use Gaussian sampling, and see the
+    same plant. Initial actions should agree until online's first batch update.
+    Report mismatches rather than silently assuming paired samples.
+    """
+    f = pd.read_csv(Path(output)/f'{scenario}_ac_nmpc_frozen.csv')
+    a = pd.read_csv(Path(output)/f'{scenario}_ac_nmpc_online.csv')
+    n = min(len(f), len(a), int(rollout_steps))
+    columns = [c for c in f.columns if c.startswith(('q_', 'r_', 'qf_'))
+               and c in a.columns]
+    if n == 0 or not columns:
+        raise RuntimeError(f'No comparable Frozen/Online weights in {scenario}')
+    fw = f.loc[:n-1, columns].to_numpy(float)
+    aw = a.loc[:n-1, columns].to_numpy(float)
+    max_weight_difference = float(np.max(np.abs(fw - aw)))
+    max_cte_difference = float(np.max(np.abs(
+        f['cte_m'].to_numpy(float)[:n] -
+        a['cte_m'].to_numpy(float)[:n]
+    )))
+    return {
+        'scenario':scenario,
+        'pre_update_steps':int(n),
+        'weight_columns_compared':len(columns),
+        'max_abs_weight_difference':max_weight_difference,
+        'max_abs_cte_difference_m':max_cte_difference,
+        'matched_weight_prefix':bool(np.allclose(fw, aw, rtol=1e-9, atol=1e-8)),
+        'matched_cte_prefix':bool(np.allclose(
+            f['cte_m'].to_numpy(float)[:n],
+            a['cte_m'].to_numpy(float)[:n],
+            rtol=1e-9, atol=1e-8
+        )),
+    }
 
 
 def main():
@@ -454,7 +866,24 @@ def main():
     ap.add_argument('--critic-lr', type=float, default=.001)
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--seed', type=int, default=0)
+    track_selection = ap.add_mutually_exclusive_group()
+    track_selection.add_argument(
+        '--track', choices=['heldout_s_bend', 'training'],
+        default='heldout_s_bend',
+        help='Default: unseen S-bend; training is an explicit legacy replay only',
+    )
+    track_selection.add_argument(
+        '--track-csv', type=Path,
+        help='Evaluate with a NEW AutoCAD XREF CSV; training references are protected',
+    )
     ap.add_argument('--nominal-only', action='store_true')
+    ap.add_argument('--include-frozen-deterministic', action='store_true',
+                    help='Also evaluate frozen Actor mean without Gaussian exploration')
+    ap.add_argument('--ablation-components', action='store_true',
+                    help='Add Actor-only and Critic-only Online control arms')
+    ap.add_argument('--isolate-qfpsi', action='store_true',
+                    help='Also compare Critic-only and both Online with pretrained '
+                         'Qf_psi(s) held fixed while other Critic outputs adapt')
     ap.add_argument(
         '--scenario-set', choices=['physical', 'ofat', 'all'], default='physical',
         help='physical: grouped physical cases; ofat: one factor at a time; all: both',
@@ -476,6 +905,8 @@ def main():
 
     if args.rollout_steps < 1 or args.seconds <= 0 or not np.isfinite(args.seconds):
         ap.error('rollout-steps and seconds must be positive')
+    if args.isolate_qfpsi and not args.ablation_components:
+        ap.error('--isolate-qfpsi requires --ablation-components')
     for lr in [args.actor_lr, args.critic_lr]:
         if not np.isfinite(lr) or lr <= 0:
             ap.error('learning rates must be positive and finite')
@@ -503,22 +934,57 @@ def main():
     if any(args.output.iterdir()):
         ap.error('Use an empty output folder to preserve prior results')
 
+    reference_metadata = install_evaluation_track(args.output, args.track, args.track_csv)
+    controllers = active_controllers(
+        args.include_frozen_deterministic,
+        include_ablation=args.ablation_components,
+        isolate_qfpsi=args.isolate_qfpsi,
+    )
     env = rl.Environment(args.seconds)
     fixed_q, fixed_r, fixed_qf = [np.asarray(w, dtype=float).tolist() for w in env.initial_weights]
 
     config = dict(
-        mode='fixed_nmpc_vs_online_actor_critic_nmpc',
+        mode='fixed_vs_frozen_vs_online_actor_critic_nmpc',
+        evaluation_track=reference_metadata['id'],
+        evaluation_reference=reference_metadata,
+        evaluation_path_is_held_out=bool(reference_metadata['held_out']),
         checkpoint_source=str(args.checkpoint),
         checkpoint_metadata=meta,
-        controllers=list(CONTROLLERS),
+        controllers=list(controllers),
         comparison_definition={
             'fixed_nmpc': (
                 'Pure NMPC baseline. Q/R/Qf = Environment.initial_weights for every sample. '
                 'No Actor, no Critic, no neural-network inference, no online learning.'
             ),
+            'ac_nmpc_frozen': (
+                'Same pretrained checkpoint as Online, same per-step Gaussian sampling and '
+                'state-dependent Q/R/Qf, but Actor/Critic and Adam optimizer are never updated.'
+            ),
+            'ac_nmpc_frozen_deterministic': (
+                'Optional frozen inference using Actor mean, without Gaussian sampling and '
+                'without any gradient/network update.'
+            ),
             'ac_nmpc_online': (
-                'Pretrained Actor-Critic checkpoint. Actor/Critic infer state-dependent Q/R/Qf '
-                'every sample and both networks are updated online through agent.learn().'
+                'Same pretrained checkpoint and Gaussian sampling as stochastic Frozen. '
+                'Actor/Critic infer Q/R/Qf per step and both networks update online through agent.learn().'
+            ),
+            'ac_nmpc_actor_only': (
+                'Only Actor updates Q/R; Critic/Qf network and Adam state stay frozen. '
+                'Both gradients are still computed: timing is diagnostic only.'
+            ),
+            'ac_nmpc_critic_only': (
+                'Only Critic updates Qf/value; Actor/Q/R network and Adam state stay frozen. '
+                'Both gradients are still computed: timing is diagnostic only.'
+            ),
+            'ac_nmpc_critic_qfpsi_held': (
+                'Only Critic updates, but applied Qf_psi(s) and its value-term '
+                'derivative are held at the pretrained Critic FUNCTION. '
+                'All other Critic outputs adapt; diagnostic-only composition.'
+            ),
+            'ac_nmpc_online_qfpsi_held': (
+                'Actor+Critic update, but applied Qf_psi(s) is held at pretrained '
+                'Critic function. Other Critic outputs and Actor continue updating; '
+                'no standalone adapted checkpoint is produced.'
             ),
         },
         fixed_nmpc_weights={'Q': fixed_q, 'R': fixed_r, 'Qf': fixed_qf},
@@ -526,8 +992,17 @@ def main():
             'same_initial_condition_per_scenario': True,
             'same_time_varying_plant_profile': True,
             'same_nmpc_internal_model': 'b.p_nominal',
-            'checkpoint_reset_for_each_ac_scenario': True,
+            'checkpoint_reset_for_each_ac_scenario_and_controller': True,
+            'frozen_online_same_sampled_rng_initial_state': True,
+            'frozen_online_same_explore_true': True,
+            'frozen_has_zero_learning_updates': True,
+            'online_rollout_steps': args.rollout_steps,
+            'same_reference_geometry_per_controller': True,
+            'heldout_path_not_seen_in_training': bool(reference_metadata['held_out']),
+            'independent_evaluation_reference_from_file': args.track_csv is not None,
         },
+        ablation_components=bool(args.ablation_components),
+        isolate_qfpsi=bool(args.isolate_qfpsi),
         rollout_steps=args.rollout_steps,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
@@ -538,7 +1013,7 @@ def main():
         scenario_set=args.scenario_set,
         plant_parameter_order=['m', 'Iz', 'Cf', 'Cr', 'lf', 'lr', 'mu_roll', 'g', 'eps_v'],
         plant_mismatch={
-            'controller_model': 'Both controllers keep NMPC model b.p_nominal.',
+            'controller_model': 'All controllers keep NMPC model b.p_nominal.',
             'payload': {
                 'start_s': args.payload_start,
                 'ramp_s': args.payload_ramp_s,
@@ -560,33 +1035,140 @@ def main():
             },
         },
         timing_note=(
-            'Fixed NMPC has policy_inference_ms=0 and learn_ms=0. AC-NMPC includes policy inference '
-            'and online learning. Environment.step wall time includes simulated plant propagation, '
-            'so timing is simulation-process timing rather than pure embedded WCET.'
+            'Fixed NMPC has policy_inference_ms=0 and learn_ms=0. '
+            'Frozen AC-NMPC has state-dependent inference, but learn_ms=0. '
+            'Online AC-NMPC has both inference and learning. '
+            'Environment.step wall time includes simulated plant propagation; '
+            'these are Python simulation-process timings rather than embedded WCET. '
+            'For sampled Frozen vs Online, common Gaussian draws are seeded identically; '
+            'their observations/policies diverge only after online updates.'
         ),
     )
     (args.output / 'config.json').write_text(json.dumps(config, indent=2))
 
     scenarios = build_scenarios(args)
     results = []
+    sampled_pairing = []
 
     for scenario in scenarios:
-        # Case 1: pure fixed-weight NMPC.  It does not load/use the Actor-Critic at runtime.
-        m_fixed = run_fixed_nmpc(env, args, scenario)
-        results.append(m_fixed)
-        pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
-        print(json.dumps(m_fixed), flush=True)
-
-        # Case 2: reset to exactly the same pretrained checkpoint for this scenario,
-        # then keep updating Actor and Critic online during the run.
-        m_ac = run_ac_nmpc_online(env, fresh_agent(args, meta), args, scenario)
-        results.append(m_ac)
-        pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
-        print(json.dumps(m_ac), flush=True)
+        for controller in controllers:
+            if controller == 'fixed_nmpc':
+                m = run_fixed_nmpc(env, args, scenario)
+            elif controller == 'ac_nmpc_frozen':
+                m = run_ac_nmpc_frozen(
+                    env, fresh_agent(args, meta), args, scenario, deterministic=False
+                )
+            elif controller == FROZEN_DETERMINISTIC:
+                m = run_ac_nmpc_frozen(
+                    env, fresh_agent(args, meta), args, scenario, deterministic=True
+                )
+            elif controller == 'ac_nmpc_online':
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario
+                )
+            elif controller in ABLATION_MODES:
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario,
+                    train_component=ABLATION_MODES[controller],
+                    controller_label=controller,
+                )
+            elif controller in QFPSI_HOLD_MODES:
+                m = run_ac_nmpc_online(
+                    env, fresh_agent(args, meta), args, scenario,
+                    train_component=QFPSI_HOLD_MODES[controller],
+                    controller_label=controller,
+                    hold_qfpsi=True,
+                )
+            else:
+                raise ValueError(f'Unknown controller: {controller}')
+            m['reference_track'] = reference_metadata['id']
+            results.append(m)
+            pd.DataFrame(results).to_csv(args.output / 'comparison.csv', index=False)
+            print(json.dumps(m), flush=True)
+        sampled_pairing.append(
+            initial_sampled_pairing(args.output, scenario['name'], args.rollout_steps)
+        )
+        pd.DataFrame(sampled_pairing).to_csv(
+            args.output / 'initial_sampled_pairing.csv', index=False
+        )
 
     comparison = pd.DataFrame(results)
+    if args.ablation_components:
+        # Pair ALL Online arms against the same sampled Frozen prefix. Before
+        # step 16 no gradient was applied, so first actions/weights/CTE
+        # must match exactly under common checkpoint/seed and plant.
+        pairing_rows = []
+        qfpsi_rows = []
+        targets = ['ac_nmpc_frozen', 'ac_nmpc_actor_only',
+                   'ac_nmpc_critic_only', 'ac_nmpc_online']
+        if args.isolate_qfpsi:
+            targets.extend(QFPSI_HOLD_MODES)
+        for scenario in scenarios:
+            name = scenario['name']
+            frozen = pd.read_csv(args.output / f'{name}_ac_nmpc_frozen.csv')
+            weight_cols = [col for col in frozen.columns
+                           if col.startswith(('q_', 'r_', 'qf_'))]
+            for controller in targets:
+                d = pd.read_csv(args.output / f'{name}_{controller}.csv')
+                measured = d.loc[d['progress_m'] >= 1.3]
+                if measured.empty:
+                    measured = d
+                match_row = comparison.loc[
+                    (comparison.scenario == name) &
+                    (comparison.controller == controller)
+                ].iloc[0]
+                qfpsi_rows.append({
+                    'scenario': name, 'controller': controller,
+                    'updates': int(match_row['updates']),
+                    'mean_cte_post_cm': 100.0 * float(match_row['mean_cte_post_m']),
+                    'max_cte_post_cm': 100.0 * float(match_row['max_cte_post_m']),
+                    'heading_rmse_post_rad': float(match_row['rmse_heading_post_rad']),
+                    'return': float(match_row['return']),
+                    'qf_psi_mean_post': float(measured['qf_2'].mean()),
+                    'qf_psi_first': float(d['qf_2'].iloc[0]),
+                    'qf_psi_last': float(d['qf_2'].iloc[-1]),
+                    'qf_psi_max_post': float(measured['qf_2'].max()),
+                    'q_psi_mean_post': float(measured['q_2'].mean()),
+                    'r_delta_mean_post': float(measured['r_1'].mean()),
+                })
+                if controller == 'ac_nmpc_frozen':
+                    continue
+                n = min(len(d), len(frozen), args.rollout_steps)
+                common_cols = [v for v in weight_cols if v in d.columns]
+                if n < 1 or len(common_cols) != 14:
+                    raise RuntimeError('Missing complete 14-weight ablation pairing log')
+                wdelta = float(np.max(np.abs(
+                    d[common_cols].to_numpy(float)[:n] -
+                    frozen[common_cols].to_numpy(float)[:n]
+                )))
+                cdelta = float(np.max(np.abs(
+                    d['cte_m'].to_numpy(float)[:n] -
+                    frozen['cte_m'].to_numpy(float)[:n]
+                )))
+                pairing_rows.append({
+                    'scenario': name, 'controller': controller,
+                    'pre_update_steps': n,
+                    'max_abs_weight_difference': wdelta,
+                    'max_abs_cte_difference_m': cdelta,
+                    'matched_weight_prefix': wdelta <= 1e-8,
+                    'matched_cte_prefix': cdelta <= 1e-8,
+                })
+                if wdelta > 1e-8 or cdelta > 1e-8:
+                    raise RuntimeError(
+                        f'Unfair sampled prefix: scenario={name}, '
+                        f'controller={controller}, weight={wdelta}, cte={cdelta}'
+                    )
+        pd.DataFrame(qfpsi_rows).to_csv(
+            args.output / 'ablation_qfpsi_summary.csv', index=False,
+        )
+        pd.DataFrame(pairing_rows).to_csv(
+            args.output / 'ablation_sampled_pairing.csv', index=False,
+        )
     pairwise = build_pairwise_summary(comparison)
     pairwise.to_csv(args.output / 'pairwise_comparison.csv', index=False)
+    build_pairwise_long(comparison).to_csv(
+        args.output / 'pairwise_learning_effect.csv', index=False
+    )
 
     timing_cols = [
         c for c in comparison.columns
@@ -604,7 +1186,7 @@ def main():
 
     import matplotlib.pyplot as plt
 
-    # Trajectory: only the two controllers that matter for the thesis comparison.
+    # Same trajectory panel: fixed, frozen sampled, online (+ optional frozen mean).
     for scenario in scenarios:
         name = scenario['name']
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -612,13 +1194,13 @@ def main():
             rl.b.REF_INFO['cad_X'], rl.b.REF_INFO['cad_Y'],
             'k--', linewidth=2, label='Reference',
         )
-        for controller in CONTROLLERS:
+        for controller in controllers:
             d = pd.read_csv(args.output / f'{name}_{controller}.csv')
             line, = ax.plot(d.X, d.Y, linewidth=1.6, label=DISPLAY[controller])
             color = line.get_color()
             ax.scatter(d.X.iloc[0], d.Y.iloc[0], color=color, marker='o', s=30)
             ax.scatter(d.X.iloc[-1], d.Y.iloc[-1], color=color, marker='x', s=60)
-        ax.set(xlabel='X [m]', ylabel='Y [m]', title=f'{name}: Fixed NMPC vs Online AC-NMPC')
+        ax.set(xlabel='X [m]', ylabel='Y [m]', title=f'{name}: Fixed / Frozen / Online AC-NMPC')
         ax.set_aspect('equal', adjustable='box')
         ax.grid(alpha=.3)
         ax.legend()
@@ -628,7 +1210,7 @@ def main():
 
     # Nominal tracking comparison.
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    for controller in CONTROLLERS:
+    for controller in controllers:
         d = pd.read_csv(args.output / f'nominal_{controller}.csv')
         axes[0].plot(d.t_s, d.cte_m * 100.0, label=DISPLAY[controller])
         axes[1].plot(d.t_s, np.rad2deg(d.e_psi), label=DISPLAY[controller])
@@ -676,18 +1258,18 @@ def main():
                 changed.append(label)
         axes[0].axhline(1.0, linestyle='--', linewidth=1.0)
         axes[0].set_ylabel('Plant / nominal')
-        axes[0].set_title(f'{name}: same plant mismatch, Fixed NMPC vs Online AC-NMPC')
+        axes[0].set_title(f'{name}: same plant mismatch, Fixed / Frozen / Online AC-NMPC')
         if changed:
             axes[0].legend(ncol=len(changed))
 
-        for controller in CONTROLLERS:
+        for controller in controllers:
             d = pd.read_csv(args.output / f'{name}_{controller}.csv')
             axes[1].plot(d.t_s, d.cte_m * 100.0, label=DISPLAY[controller])
             axes[2].plot(d.t_s, np.rad2deg(d.e_psi), label=DISPLAY[controller])
         axes[1].set_ylabel('CTE [cm]')
         axes[2].set_ylabel('Heading error [deg]')
-        axes[1].legend(ncol=2)
-        axes[2].legend(ncol=2)
+        axes[1].legend(ncol=min(len(controllers), 4))
+        axes[2].legend(ncol=min(len(controllers), 4))
 
         qbase, rbase, fbase = rl.Q_BASE, rl.R_BASE, rl.F_BASE
         if 'q_4' in ac:
@@ -712,7 +1294,7 @@ def main():
 
     # Direct computational-cost comparison.
     fig, ax = plt.subplots(figsize=(11, 5))
-    for controller in CONTROLLERS:
+    for controller in controllers:
         d = pd.read_csv(args.output / f'nominal_{controller}.csv')
         ax.plot(d.t_s, d.control_step_total_ms, linewidth=1.0, label=DISPLAY[controller])
     ax.axhline(
@@ -721,38 +1303,58 @@ def main():
     )
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('Processing time / step [ms]')
-    ax.set_title('Nominal computational cost: Fixed NMPC vs Online AC-NMPC')
+    ax.set_title('Nominal computational cost: Fixed / Frozen / Online AC-NMPC')
     ax.grid(alpha=.25)
     ax.legend()
     fig.tight_layout()
     fig.savefig(args.output / 'timing_fixed_vs_ac.png', dpi=170)
     plt.close(fig)
 
-    # Compact metric comparison figure.
+    # Compact comparison across all control modes (rather than only fixed/online).
     if not pairwise.empty:
-        fig, axes = plt.subplots(2, 1, figsize=(10, 8))
-        x = np.arange(len(pairwise))
-        width = 0.36
-        axes[0].bar(x - width / 2, pairwise.fixed_mean_cte_post_m * 100.0,
-                    width, label='Fixed NMPC')
-        axes[0].bar(x + width / 2, pairwise.ac_mean_cte_post_m * 100.0,
-                    width, label='Online AC-NMPC')
-        axes[0].set_ylabel('Mean post CTE [cm]')
-        axes[0].set_xticks(x, pairwise.scenario, rotation=20)
-        axes[0].grid(axis='y', alpha=.25)
-        axes[0].legend()
-
-        axes[1].bar(x - width / 2, pairwise.fixed_max_cte_post_m * 100.0,
-                    width, label='Fixed NMPC')
-        axes[1].bar(x + width / 2, pairwise.ac_max_cte_post_m * 100.0,
-                    width, label='Online AC-NMPC')
-        axes[1].set_ylabel('Max post CTE [cm]')
-        axes[1].set_xticks(x, pairwise.scenario, rotation=20)
-        axes[1].grid(axis='y', alpha=.25)
-        axes[1].legend()
+        fig, axes = plt.subplots(2, 1, figsize=(11, 8))
+        names = pairwise['scenario'].tolist()
+        x = np.arange(len(names))
+        width = 0.78 / len(controllers)
+        for j, controller in enumerate(controllers):
+            group = comparison.loc[comparison.controller == controller].set_index('scenario')
+            group = group.reindex(names)
+            offset = (j - (len(controllers)-1)/2.0)*width
+            axes[0].bar(x+offset, group['mean_cte_post_m'].to_numpy(float)*100.0,
+                        width, label=DISPLAY[controller])
+            axes[1].bar(x+offset, group['max_cte_post_m'].to_numpy(float)*100.0,
+                        width, label=DISPLAY[controller])
+        for ax, ylabel in zip(axes, ['Mean post CTE [cm]', 'Max post CTE [cm]']):
+            ax.set_ylabel(ylabel)
+            ax.set_xticks(x, names, rotation=20)
+            ax.grid(axis='y', alpha=.25)
+            ax.legend(ncol=2)
         fig.tight_layout()
         fig.savefig(args.output / 'tracking_metric_comparison.png', dpi=170)
         plt.close(fig)
+
+    # Direct nominal parameter-multiplier comparison: Frozen vs Online.
+    frozen = pd.read_csv(args.output / 'nominal_ac_nmpc_frozen.csv')
+    online = pd.read_csv(args.output / 'nominal_ac_nmpc_online.csv')
+    fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+    for ax, col, nominal, title in zip(
+        axes,
+        ('q_4', 'q_2', 'r_1', 'qf_5'),
+        (rl.Q_BASE[4], rl.Q_BASE[2], rl.R_BASE[1], rl.F_BASE[5]),
+        ('Actor alpha_pos', 'Actor alpha_psi',
+         'Actor beta_delta', 'Critic Qf_Y multiplier')
+    ):
+        ax.plot(frozen.t_s, frozen[col]/nominal,
+                label=DISPLAY['ac_nmpc_frozen'])
+        ax.plot(online.t_s, online[col]/nominal,
+                label=DISPLAY['ac_nmpc_online'])
+        ax.set_ylabel(title)
+        ax.legend()
+        ax.grid(alpha=.25)
+    axes[-1].set_xlabel('Time [s]')
+    fig.tight_layout()
+    fig.savefig(args.output / 'nominal_frozen_vs_online_multipliers.png', dpi=170)
+    plt.close(fig)
 
 
 if __name__ == '__main__':
