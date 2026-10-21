@@ -213,12 +213,21 @@ class GaussianWeightActor:
                              float(self._logp(z[None,:],
                                               mu[None,:], sigma[None,:])[0]))
 
-    def loss_and_gradients(self, observations, sampled_latents, frozen_td):
-        """Policy-gradient DESCENT loss = -mean(stop_grad(TD)*logpi(z|s)).
+    def loss_and_gradients(self, observations, sampled_latents, frozen_td,
+                           *, output_gradient_scale=None):
+        """TD score-function gradient, optionally preconditioned per output.
 
-        Stored Gaussian z and TD are treated as constants. The chain rule
-        updates both mean and sigma heads and all shared hidden parameters;
-        gradients never pass through squash/NMPC/reparameterized sampling.
+        Original scalar diagnostic loss remains Eq.(8):
+        -mean(stop_grad(TD)*logpi(z|s)).
+        output_gradient_scale=None is the EXACT old gradient. If the
+        explicit eight positive multipliers are supplied, the individual
+        Q[0:6],R[0:2] score contributions are multiplied BEFORE the
+        shared layers' backprop, so mean, sigma and both hidden layers
+        receive the correct preconditioned sum. The preconditioned
+        gradient is not the derivative of the unweighted diagnostic
+        actor loss when factors differ from one. Neither Q/R physical
+        values nor fixed reward are multiplied.
+        No gradients pass through squash/NMPC/reparameterized sampling.
         """
         obs, _ = self._batch(observations)
         z = np.asarray(sampled_latents, dtype=float)
@@ -227,14 +236,23 @@ class GaussianWeightActor:
         if (n == 0 or z.shape != (n, 8) or td.shape != (n,) or
                 not np.all(np.isfinite(z)) or not np.all(np.isfinite(td))):
             raise ValueError("Expected obs (n,17), latent (n,8), TD (n,)")
+        if output_gradient_scale is None:
+            factors=np.ones(WEIGHT_DIM,dtype=float)
+        else:
+            factors=np.asarray(output_gradient_scale,dtype=float)
+            if (factors.shape!=(WEIGHT_DIM,) or
+                not np.all(np.isfinite(factors)) or np.any(factors<=0)):
+                raise ValueError(
+                    "output_gradient_scale must have exactly 8 positive finite entries")
         mu, sigma, (h1, h2, frac) = self._forward(obs)
         loss = -float(np.mean(td * self._logp(z, mu, sigma)))
         d = z - mu
         inv = 1. / sigma
-        dmu = -(td[:,None] / n) * d * inv**2
+        dmu = -(td[:,None] / n) * d * inv**2 * factors[None,:]
         dlogp_dsigma = (d**2 * inv**2 - 1.) * inv
         draw = -(td[:,None] / n) * dlogp_dsigma * (
-            (self.sigma_upper - self.sigma_lower) * frac * (1. - frac))
+            (self.sigma_upper - self.sigma_lower) * frac * (1. - frac)
+        ) * factors[None,:]
         p = self.params
         grad = {
             "W_mu": h2.T @ dmu, "b_mu": np.sum(dmu, axis=0),
