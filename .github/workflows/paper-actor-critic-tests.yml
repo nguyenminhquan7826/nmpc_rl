@@ -32,6 +32,8 @@ jobs:
         run: python -m unittest -v test_critic_return_audit
       - name: Positive no-upper 6P QR regression and policy-mixture diagnostics
         run: python -m unittest -v test_positive_critic_fit
+      - name: Independent per-output Actor and six-P critic learning rates
+        run: python -m unittest -v test_component_learning_rates
       - name: One real Actor to adaptive NMPC to plant TD0 smoke solve
         run: python -m unittest -v test_actor_critic_nmpc_integration
       - name: Frozen deterministic checkpoint evaluation including real CasADi solve
