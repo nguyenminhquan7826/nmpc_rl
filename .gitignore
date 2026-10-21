@@ -10,6 +10,8 @@ env/
 /nmpc_casadi/sweep_results/
 /nmpc_casadi/results_*/
 /nmpc_casadi/reference_split/
+/nmpc_casadi/results/
+/nmpc_casadi/images/
 /nmpc_casadi/*_output/
 /nmpc_casadi/*.npz
 /nmpc_casadi/*.png
