@@ -53,7 +53,7 @@ class CriticReturnAuditTests(unittest.TestCase):
         rng=np.random.default_rng(7)
         e=rng.normal(size=(600,6))*np.array([.1,.05,.2,.08,.04,.08])
         x=e*e
-        true=np.array([110.,28.,80.,70.,1000.,1300.])
+        true=np.array([160.,40.,350.,100.,2000.,2300.])
         target=x@true
         lower,upper=screening_box(.2)
         estimate,diag=fitted_box_least_squares(
