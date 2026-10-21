@@ -27,7 +27,7 @@ from direct_p_critic import SixParameterTDCritic
 from rl_paper_core import td_error
 from screen_training_weights import verify_train_reference
 from train_rl_environment import TrainEnvironment
-from training_initialization import LEARNING_INITIAL, TRAIN_REFERENCE_SHA256
+from training_initialization import LEARNING_INITIAL, TRAIN_REFERENCE_SHA256, screening_box
 
 
 def read_screened_box(path):
@@ -72,7 +72,12 @@ def write_checkpoint(path,actor,critic,metadata):
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reference",type=Path,required=True)
-    ap.add_argument("--screen-manifest",type=Path,required=True)
+    ap.add_argument("--screen-manifest",type=Path)
+    ap.add_argument("--use-internal-box",action="store_true",
+                    help="Use source-defined, formerly screened 20-percent experimental bounds; no external manifest needed")
+    ap.add_argument("--box-margin",type=float,default=0.20)
+    ap.add_argument("--save-at",type=int,nargs="+",
+                    help="Save detailed episode CSV and checkpoint only after these 1-based episodes")
     ap.add_argument("--output",type=Path,required=True)
     ap.add_argument("--reward-audit-summary",type=Path,
                     help="Mandatory for >10 steps or >1 episode: checked 27-case TRAIN reward audit summary")
@@ -103,11 +108,26 @@ def main(argv=None):
         v=getattr(args,k)
         if not np.isfinite(v) or v<=0:
             ap.error(f"{k} must be positive finite")
-    if (args.episodes>1 or args.steps_per_episode>10) and args.reward_audit_summary is None:
-        ap.error("Multi-episode or >10-step training requires --reward-audit-summary")
+    if args.use_internal_box and args.screen_manifest is not None:
+        ap.error("Choose either source-defined box or external screen manifest")
+    if not args.use_internal_box and args.screen_manifest is None:
+        ap.error("Either --use-internal-box or --screen-manifest is required")
+    if (args.episodes>1 or args.steps_per_episode>10) and args.reward_audit_summary is None and not args.use_internal_box:
+        ap.error("Long CLI training with an external screening manifest still requires the matching reward audit")
+    if args.save_at is not None and (len(set(args.save_at))!=len(args.save_at)
+                                   or any(ep<1 or ep>args.episodes for ep in args.save_at)):
+        ap.error("--save-at must contain unique 1-based episodes within the run")
     try:
         ref,digest=verify_train_reference(args.reference)
-        lo,hi,screen_doc=read_screened_box(args.screen_manifest)
+        if args.use_internal_box:
+            lo,hi=screening_box(args.box_margin)
+            screen_doc={
+                "profile":"source_constant_screen_design",
+                "total_samples":None,
+                "empirical_all_pass":None,
+            }
+        else:
+            lo,hi,screen_doc=read_screened_box(args.screen_manifest)
         reward_audit_doc=(
             verify_reward_audit(args.reward_audit_summary,args.gamma)
             if args.reward_audit_summary is not None else None
@@ -170,6 +190,8 @@ def main(argv=None):
         "ey_m":args.ey,"heading_deg":args.heading_deg,
         "screen_profile":screen_doc["profile"],
         "reward_audit_verified":reward_audit_doc is not None,
+        "weight_box_source":"source_defined_margin_only_not_stability_certified" if args.use_internal_box else "27_case_screening_manifest",
+        "fixed_reward_source":"source_code_fixed_Qe_Re_not_external_audit" if reward_audit_doc is None else "verified_27_case_reward_audit",
         "offline_empirical_screen_count":screen_doc["total_samples"],
         "staging_detail":"Generic CAD reference-tail utility used only to stage TRAIN; no TEST inputs",
         "terminal_conditions_certified":False,
@@ -219,7 +241,8 @@ def main(argv=None):
             if terminated or truncated:
                 break
         df=pd.DataFrame(rows)
-        df.to_csv(out/f"episode_{ep:04d}.csv",index=False)
+        if args.save_at is None or (ep+1) in args.save_at:
+            df.to_csv(out/f"episode_{ep:04d}.csv",index=False)
         record={
             "episode":ep,"steps":len(df),
             "return":float(df.reward.sum()),
@@ -233,10 +256,22 @@ def main(argv=None):
             "terminated":bool(df.terminated.iloc[-1]),
             "truncated":bool(df.truncated.iloc[-1]),
         }
+        # Compact all-episode Q/R/Qf histories for plotting without 100
+        # separate per-step CSVs. Means are sampled ACTION weights per
+        # episode; Qf is the learned Critic P after the final TD update.
+        for prefix,n in (("q",6),("r",2)):
+            for i in range(n):
+                record[f"{prefix}_mean_{i}"]=float(df[f"{prefix}_{i}"].mean())
+                record[f"{prefix}_std_{i}"]=float(df[f"{prefix}_{i}"].std(ddof=0))
+        for i,value in enumerate(critic.p):
+            record[f"qf_final_{i}"]=float(value)
+        record["sigma_mean_episode"]=float(df["sigma_mean"].mean())
+        record["qf_step_total"]=float(df["critic_param_step_norm"].sum())
         history.append(record)
         pd.DataFrame(history).to_csv(out/"training_history.csv",index=False)
-        write_checkpoint(out/f"checkpoint_ep{ep:04d}.npz",actor,critic,
-                         {**meta,"checkpoint_episode":ep})
+        if args.save_at is None or (ep+1) in args.save_at:
+            write_checkpoint(out/f"checkpoint_ep{ep:04d}.npz",actor,critic,
+                             {**meta,"checkpoint_episode":ep})
         print(json.dumps(record),flush=True)
     return history
 
