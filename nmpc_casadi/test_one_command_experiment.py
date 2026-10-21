@@ -26,14 +26,18 @@ class MinimalLayoutTests(unittest.TestCase):
         self.assertNotIn("--reward-audit-summary",args)
         self.assertEqual(args[args.index("--gamma")+1],"0.9")
         self.assertEqual(args[args.index("--episodes")+1],"10")
-        self.assertEqual(args[-3:],["1","5","10"])\n        self.assertEqual(args[args.index("--critic-lr")+1],"0.01")\n        self.assertEqual(args[args.index("--critic-component-scales")+1:args.index("--episodes")],\n                         [str(x) for x in cfg.CRITIC_P_LR_FACTORS])
+        self.assertEqual(args[-3:],["1","5","10"])
+        self.assertEqual(args[args.index("--critic-lr")+1],"0.01")
+        self.assertEqual(args[args.index("--critic-component-scales")+1:args.index("--episodes")],
+                         [str(x) for x in cfg.CRITIC_P_LR_FACTORS])
 
     def test_layout_has_only_two_new_output_roots_and_pinned_source(self):
         self.assertEqual(cfg.TRAIN_CSV.parent,cfg.TRAJECTORY_DIR)
         self.assertEqual(cfg.RESULTS_DIR.name,"results")
         self.assertEqual(cfg.IMAGES_DIR.name,"images")
         self.assertEqual(cfg.GAMMA,.9)
-        self.assertEqual(cfg.EPISODES,10)\n        self.assertEqual(cfg.CHECKPOINT_EPISODES,(1,5,10))
+        self.assertEqual(cfg.EPISODES,10)
+        self.assertEqual(cfg.CHECKPOINT_EPISODES,(1,5,10))
 
     def test_fixed_actor_preserves_qr_and_cannot_sample(self):
         q,r,_=LEARNING_INITIAL.arrays()
