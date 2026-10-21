@@ -148,6 +148,22 @@ def main(argv=None):
                                abs(float(b.cfg["u_max"][1]))))
     if staged["reference_sha256"]!=digest:
         raise RuntimeError("TRAIN reference staging changed the original")
+    if args.use_internal_box:
+        # Flat layout: put supporting trajectory derivatives alongside
+        # original pinned TRAIN CSV, NOT in the numerical results folder.
+        import shutil
+        from experiment_config import TRAJECTORY_DIR
+        targets={
+            "reference_file":TRAJECTORY_DIR/"_rl_validated_train_copy.csv",
+            "tail_file":TRAJECTORY_DIR/"_rl_prediction_tail.csv",
+        }
+        if any(target.exists() for target in targets.values()):
+            raise FileExistsError(
+                "Generated TRAIN trajectory/tail already exist. "
+                "Preserve prior inputs or move archival derivatives first.")
+        for key,target in targets.items():
+            shutil.move(str(staged[key]),str(target))
+            staged[key]=str(target)
     b.REF_INFO=ref_info
     b.TAIL_FILE=Path(staged["tail_file"])
     b.CAD_S_END=float(ref_info["cad_s_end"])
