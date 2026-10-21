@@ -50,6 +50,18 @@ def read_screened_box(path):
     return lo,hi,doc
 
 
+def verify_reward_audit(path, gamma):
+    doc=json.loads(Path(path).read_text(encoding="utf-8"))
+    if (doc.get("type")!="TRAIN_ONLY_FIXED_REWARD_CANDIDATE_NO_LEARNING" or
+        doc.get("train_sha256")!=TRAIN_REFERENCE_SHA256 or
+        doc.get("cases")!=27 or
+        doc.get("Qe")!=Q_EVAL_CANDIDATE.tolist() or
+        doc.get("Re")!=R_EVAL_CANDIDATE.tolist() or
+        not np.isclose(doc.get("gamma_diagnostic",float("nan")),gamma)):
+        raise ValueError("Require 27-case pinned TRAIN reward/TD audit with the SAME gamma and Qe/Re")
+    return doc
+
+
 def write_checkpoint(path,actor,critic,metadata):
     arrays={f"actor_{name}":v for name,v in actor.params.items()}
     arrays["critic_physical_P"]=critic.p
@@ -62,6 +74,8 @@ def main(argv=None):
     ap.add_argument("--reference",type=Path,required=True)
     ap.add_argument("--screen-manifest",type=Path,required=True)
     ap.add_argument("--output",type=Path,required=True)
+    ap.add_argument("--reward-audit-summary",type=Path,
+                    help="Mandatory for >10 steps or >1 episode: checked 27-case TRAIN reward audit summary")
     ap.add_argument("--acknowledge-empirical-only",action="store_true",
                     help="Acknowledge 27/27 fixed-weight runs do NOT prove closed-loop stability for adaptive Q/R/P")
     ap.add_argument("--reward-candidate",choices=["legacy"],required=True,
@@ -89,9 +103,15 @@ def main(argv=None):
         v=getattr(args,k)
         if not np.isfinite(v) or v<=0:
             ap.error(f"{k} must be positive finite")
+    if (args.episodes>1 or args.steps_per_episode>10) and args.reward_audit_summary is None:
+        ap.error("Multi-episode or >10-step training requires --reward-audit-summary")
     try:
         ref,digest=verify_train_reference(args.reference)
         lo,hi,screen_doc=read_screened_box(args.screen_manifest)
+        reward_audit_doc=(
+            verify_reward_audit(args.reward_audit_summary,args.gamma)
+            if args.reward_audit_summary is not None else None
+        )
     except (ValueError,KeyError,FileNotFoundError) as exc:
         ap.error(str(exc))
     out=args.output.expanduser().resolve()
@@ -149,6 +169,7 @@ def main(argv=None):
         "steps_per_episode":args.steps_per_episode,
         "ey_m":args.ey,"heading_deg":args.heading_deg,
         "screen_profile":screen_doc["profile"],
+        "reward_audit_verified":reward_audit_doc is not None,
         "offline_empirical_screen_count":screen_doc["total_samples"],
         "staging_detail":"Generic CAD reference-tail utility used only to stage TRAIN; no TEST inputs",
         "terminal_conditions_certified":False,
