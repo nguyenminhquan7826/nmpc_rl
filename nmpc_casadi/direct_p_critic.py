@@ -101,6 +101,10 @@ class SixParameterTDCritic:
     def td_step(self, error, next_error, reward, gamma, learning_rate, *, terminated=False):
         """Perform exactly one projected TD(0) semi-gradient step.
 
+        learning_rate may be a scalar, or exactly six positive component
+        rates for [vx,vy,psi,r,X,Y]. This is an explicit diagonal SGD
+        preconditioner, not an extra neural Critic or reward adjustment.
+
         For terminal=true, the future value is zero. A time-limit truncation
         must be passed as terminated=false so it continues to bootstrap.
         No derivative is taken through next_error or the next-state value.
@@ -111,8 +115,15 @@ class SixParameterTDCritic:
             terminated = bool(terminated)
         else:
             raise ValueError("terminated must be boolean, not a truncation flag")
-        if not np.isfinite(reward) or not np.isfinite(learning_rate) or learning_rate <= 0:
-            raise ValueError("reward must be finite and learning_rate must be positive")
+        # Allow a common scalar LR (the paper-aligned baseline) or six
+        # independently selected physical-P rates for an explicit ablation.
+        rate=np.asarray(learning_rate,dtype=float)
+        if (rate.shape not in ((),(6,)) or
+            not np.all(np.isfinite(rate)) or np.any(rate<=0)):
+            raise ValueError(
+                "reward/learning rate: require finite positive scalar or six LR values")
+        if not np.isfinite(reward):
+            raise ValueError("reward must be finite")
         before = self._p.copy()
         value_now = -float(np.dot(before, e**2))
         value_next = 0.0 if terminated else -float(np.dot(before, en**2))
@@ -121,7 +132,7 @@ class SixParameterTDCritic:
         # dL/dp_i = (V(s)-target) * dV/dp_i = delta * e_i**2
         # because V=-sum(p_i*e_i**2), delta=target-V.
         semi_grad = d * e**2
-        new_p = project_box_admissible(before - float(learning_rate)*semi_grad,
+        new_p = project_box_admissible(before - rate*semi_grad,
                                       self.lower, self.upper)
         self._p = new_p.copy()
         return CriticStep(
