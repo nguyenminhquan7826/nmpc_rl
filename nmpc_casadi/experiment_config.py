@@ -16,8 +16,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results"
-IMAGES_DIR = BASE_DIR / "images"
+RESULTS_DIR = BASE_DIR / "results_g090_ep10_LR02"
+IMAGES_DIR = BASE_DIR / "images_g090_ep10_LR02"
 TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
@@ -33,10 +33,11 @@ SEED = 0
 INITIAL_EY_M = .05
 INITIAL_HEADING_DEG = 0.
 
-# Gamma .90 pilot: change Critic Qf update rates ONLY. Actor is frozen
-# in learning-rate *settings*, NOT frozen NN weights; it keeps training.
-ACTOR_LR = 1e-6
-CRITIC_LR = 1e-2
+# Gamma .90 joint Actor/Critic pilot. The Actor learning rate is
+# intentionally much higher than the original 100-episode experiment;
+# monitor per-step actor updates and solver performance.
+ACTOR_LR = 1e-3
+CRITIC_LR = 1e-3
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].
@@ -44,12 +45,12 @@ CRITIC_LR = 1e-2
 # and their contributions to the shared hidden layers.
 # CRITIC order: Qf=P[vx,vy,psi,r,X,Y]; direct six-parameter TD updates.
 #
-# Nonuniform Critic rates below are an exploratory 10-episode ablation.
-# They are NOT certified safe/optimal; compare with the previous 100-ep
-# baseline and check NMPC solver success, return, relative Qf changes.
-# Keep Actor factors as one to isolate the Critic learning-rate change.
-# Results/images must be empty, preserving your previous experiment.
-ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1., 1., 1., 1.)
+# This 10-episode joint Actor/Critic pilot ALSO scales both R output
+# gradients by 1.8, while keeping Q factors at 1.0. Consequently, it
+# does NOT isolate effects of Critic learning-rate preconditioning.
+# No theoretical stability or training convergence guarantee.
+# The destination folders must be empty, preserving previous results.
+ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1., 1., 1.8, 1.8)
 CRITIC_P_LR_FACTORS = (1.23, 0.86, 0.25, 0.41, 1.84, 1.85)
 SIGMA_MIN = .02
 SIGMA_INIT = .10
