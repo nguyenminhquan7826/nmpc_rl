@@ -91,6 +91,10 @@ def main(argv=None):
     ap.add_argument("--sigma-upper",type=float,required=True)
     ap.add_argument("--actor-lr",type=float,required=True)
     ap.add_argument("--critic-lr",type=float,required=True)
+    ap.add_argument("--actor-output-scales",type=float,nargs=8,
+                    metavar=("Qvx","Qvy","Qpsi","Qr","QX","QY","Ra","Rdelta"))
+    ap.add_argument("--critic-component-scales",type=float,nargs=6,
+                    metavar=("Pvx","Pvy","Ppsi","Pr","PX","PY"))
     ap.add_argument("--episodes",type=int,required=True)
     ap.add_argument("--steps-per-episode",type=int,required=True)
     ap.add_argument("--seed",type=int,default=0)
@@ -112,6 +116,16 @@ def main(argv=None):
         ap.error("Choose either source-defined box or external screen manifest")
     if not args.use_internal_box and args.screen_manifest is None:
         ap.error("Either --use-internal-box or --screen-manifest is required")
+    for name,values,length in (
+        ("actor_output_scales",args.actor_output_scales,8),
+        ("critic_component_scales",args.critic_component_scales,6),
+    ):
+        if values is not None and (
+            len(values)!=length or
+            not np.all(np.isfinite(values)) or
+            np.any(np.asarray(values)<=0)
+        ):
+            ap.error(f"{name} must be {length} finite positive multipliers")
     if (args.episodes>1 or args.steps_per_episode>10) and args.reward_audit_summary is None and not args.use_internal_box:
         ap.error("Long CLI training with an external screening manifest still requires the matching reward audit")
     if args.save_at is not None and (len(set(args.save_at))!=len(args.save_at)
@@ -204,6 +218,16 @@ def main(argv=None):
         "actor_optimizer":"SGD_paper_score_function",
         "critic_optimizer":"projected_TD0_semi_gradient",
         "actor_lr":args.actor_lr,"critic_lr":args.critic_lr,
+        "actor_output_lr_factors": (
+            list(args.actor_output_scales) if args.actor_output_scales is not None
+            else [1.]*8
+        ),
+        "critic_p_lr_factors": (
+            list(args.critic_component_scales) if args.critic_component_scales is not None
+            else [1.]*6
+        ),
+        "actor_gradient_mode":"per_output_score_preconditioning_before_shared_backprop",
+        "critic_gradient_mode":"per_component_projected_TD0",
         "gamma":args.gamma,
         "sigma_lower":args.sigma_lower,
         "sigma_initial":args.sigma_initial,
@@ -233,7 +257,9 @@ def main(argv=None):
                 actor,critic,obs.features,proposal.latent,
                 obs.error,next_obs.error,reward,
                 gamma=args.gamma,actor_lr=args.actor_lr,
-                critic_lr=args.critic_lr,terminated=terminated)
+                critic_lr=args.critic_lr,terminated=terminated,
+                actor_output_scales=args.actor_output_scales,
+                critic_component_scales=args.critic_component_scales)
             row={
                 "episode":ep,"step":step,
                 "reward":reward,"td":update.td,
