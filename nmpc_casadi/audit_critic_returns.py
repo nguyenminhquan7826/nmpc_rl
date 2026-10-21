@@ -1,4 +1,4 @@
-"""TRAIN-ONLY discounted return / direct-six-P critic representability audit.
+r"""TRAIN-ONLY discounted return / direct-six-P critic representability audit.
 
 This is an OFFLINE diagnostic, not TD learning or policy evaluation of RL.
 Loads all 27 previously screened *fixed-weight* TRAIN trajectories and
