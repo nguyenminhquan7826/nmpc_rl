@@ -1,0 +1,154 @@
+"""Live Actor/Critic/NMPC transition environment on the pinned TRAIN track.
+
+The NMPC solver is a black box: no gradient passes through it.
+Dynamics/constraints and two-attempt fallback follow the existing
+fixed-NMPC simulator. This environment makes no stability theorem claim.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+import numpy as np
+
+import baseline as b
+from nmpc_casadi import (
+    build_nmpc_solver, unpack_solution, shift_warm_start,
+)
+from critic_nmpc_bridge import actor_critic_nmpc_parameters
+from direct_p_critic import error_from_state
+from gaussian_weight_actor import build_actor_observation
+from rl_paper_core import paper_reward
+
+
+@dataclass(frozen=True)
+class Observation:
+    features: np.ndarray
+    error: np.ndarray
+    physical: np.ndarray
+    reference: dict
+
+
+class TrainEnvironment:
+    """A single TRAIN episode; caller stages TRAIN path before creating it."""
+
+    def __init__(self, *, train_length_m, q_initial, r_initial, p_initial,
+                 task_qe, task_re, max_steps, ey, heading_deg):
+        self.train_length_m=float(train_length_m)
+        if not np.isfinite(self.train_length_m) or self.train_length_m<=0:
+            raise ValueError("train_length_m must be positive finite")
+        self.task_qe=np.asarray(task_qe,dtype=float).copy()
+        self.task_re=np.asarray(task_re,dtype=float).copy()
+        if self.task_qe.shape!=(6,) or self.task_re.shape!=(2,) or (
+            np.any(self.task_qe<=0) or np.any(self.task_re<=0) or
+            not np.all(np.isfinite(self.task_qe)) or
+            not np.all(np.isfinite(self.task_re))
+        ):
+            raise ValueError("positive fixed reward Qe[6], Re[2] required")
+        self.max_steps=int(max_steps)
+        if self.max_steps<1 or self.max_steps!=max_steps:
+            raise ValueError("max_steps must be a positive integer")
+        self.ey=float(ey)
+        self.heading_deg=float(heading_deg)
+        if not np.isfinite(self.ey) or not np.isfinite(self.heading_deg):
+            raise ValueError("initial offsets must be finite")
+        self.solver=build_nmpc_solver(
+            b.Fd_controller,b.N,np.diag(q_initial),np.diag(r_initial),
+            np.diag(p_initial),b.cfg,adaptive_cost_weights=True)
+        self.reset()
+
+    def reset(self):
+        self.rm=b.make_reference_manager()
+        self.x,self.prev,self.guess,_=b.build_initial_state_and_guess(
+            self.rm,self.solver,self.ey,np.deg2rad(self.heading_deg))
+        self.k=0
+        self.fail_streak=0
+        self.done=False
+        return self.observe()
+
+    def observe(self):
+        ref=self.rm.get_nmpc_reference(
+            float(self.x[4]),float(self.x[5]),b.Ts,b.N)
+        er=error_from_state(self.x,ref["xref"][0])
+        curvature=self.rm.interpolate_curvature(ref["s_horizon"])
+        features=build_actor_observation(
+            self.x,ref["xref"][0],self.prev,
+            path_progress_m=float(ref["projection"]["s"]),
+            path_start_m=float(self.rm.s_start),path_end_m=float(b.CAD_S_END),
+            curvature_now=float(curvature[0]),
+            curvature_horizon_end=float(curvature[-1]),
+            reference_origin_xy=np.array([self.rm.X[0],self.rm.Y[0]]),
+            reference_initial_heading_rad=float(self.rm.psi[0]),
+            train_path_length_m=self.train_length_m)
+        return Observation(features,er,self.x.copy(),ref)
+
+    def step(self,actor_q,actor_r,critic,pre):
+        """Apply actual first NMPC input and return (next_obs,reward,terminated,
+        truncated,step_diagnostics); includes paper Eq. (4) only.
+        """
+        if self.done:
+            raise RuntimeError("Episode finished; call reset")
+        x0=self.x.copy()
+        prev=self.prev.copy()
+        params=actor_critic_nmpc_parameters(
+            x0,prev,pre.reference["xref"],b.p_nominal,
+            actor_q,actor_r,critic)
+        success=False
+        primary=False
+        violation=float("inf")
+        attempts=0
+        for attempt in range(2):
+            attempts+=1
+            guess=self.guess if attempt==0 else b.build_fresh_dynamics_rollout_guess(
+                self.rm,self.x,self.prev,pre.reference)
+            try:
+                raw=self.solver["solver"](
+                    x0=guess,p=params,
+                    lbx=self.solver["lbx"],ubx=self.solver["ubx"],
+                    lbg=self.solver["lbg"],ubg=self.solver["ubg"])
+                solution=np.asarray(raw["x"],float).reshape(-1)
+                constraint=np.asarray(raw["g"],float).reshape(-1)
+                violation=float(max(
+                    np.max(np.maximum(self.solver["lbx"]-solution,0)),
+                    np.max(np.maximum(solution-self.solver["ubx"],0)),
+                    np.max(np.maximum(self.solver["lbg"]-constraint,0)),
+                    np.max(np.maximum(constraint-self.solver["ubg"],0))))
+                success=bool(self.solver["solver"].stats().get("success",False)
+                         and np.all(np.isfinite(solution))
+                         and np.isfinite(violation) and violation<=1e-6)
+                if success:
+                    xpred, upred=unpack_solution(solution,b.N)
+                    u=upred[:,0].copy()
+                    self.guess=shift_warm_start(xpred,upred)
+                    primary=attempt==0
+                    break
+            except Exception:
+                success=False
+        if not success:
+            u=prev.copy()
+            self.fail_streak+=1
+        else:
+            self.fail_streak=0
+        du=u-prev
+        reward=float(paper_reward(pre.error,du,self.task_qe,self.task_re))
+        candidate_x=np.asarray(b.Fd_plant(self.x,u,b.p_nominal),float).reshape(-1)
+        invalid=candidate_x.shape!=(6,) or not np.all(np.isfinite(candidate_x))
+        if not invalid:
+            self.x=candidate_x
+        self.prev=u.copy()
+        self.k+=1
+        next_obs=self.observe()
+        reached=bool(next_obs.reference["projection"]["s"]>=b.CAD_S_END-.03)
+        catastrophic=bool(invalid or self.fail_streak>=3)
+        terminated=bool(reached or catastrophic)
+        truncated=bool(self.k>=self.max_steps and not terminated)
+        self.done=terminated or truncated
+        return next_obs,reward,terminated,truncated,{
+            "step":self.k,"solver_success":success,
+            "solver_primary_success":primary,"solver_attempts":attempts,
+            "max_constraint_violation":violation,
+            "invalid_plant_state":invalid,
+            "failure_streak":self.fail_streak,
+            "reached_end":reached,"failure_terminal":catastrophic,
+            "progress_m":float(next_obs.reference["projection"]["s"]),
+            "cte_m":float(pre.reference["projection"]["distance"]),
+            "du_a":float(du[0]),"du_delta":float(du[1]),
+            "a":float(u[0]),"steering":float(u[1]),
+        }
