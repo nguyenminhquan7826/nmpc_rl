@@ -40,6 +40,8 @@ jobs:
         run: python -m unittest -v test_evaluate_training_curve
       - name: One-command experiment layout, frozen comparator and Q/R/Qf plotting tests
         run: python -m unittest -v test_one_command_experiment
+      - name: Locate pinned user TRAIN copies without TEST or overwriting original
+        run: python -m unittest -v test_train_reference_locator
       - name: Existing vehicle and NMPC baseline tests
         run: python -m unittest -v test_nmpc_core
       - name: Standalone baseline NMPC still works
