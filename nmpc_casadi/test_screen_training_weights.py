@@ -17,17 +17,17 @@ from training_initialization import (
 
 
 class ScreeningSpecTests(unittest.TestCase):
-    def test_learning_initial_matches_user_uploaded_candidate_two(self):
+    def test_learning_initial_matches_completed_v3_start(self):
         q, r, p = LEARNING_INITIAL.arrays()
-        np.testing.assert_allclose(q, [12.,3.,7.5,6.,100.,100.])
-        np.testing.assert_allclose(r, [.6,32.])
-        np.testing.assert_allclose(p, [96.,24.,60.,48.,800.,800.])
+        np.testing.assert_allclose(q, [12.,3.,50.,6.,100.75,100.75])
+        np.testing.assert_allclose(r, [5.,10.])
+        np.testing.assert_allclose(p, [120.,30.,500.,60.,1007.5,1007.5])
 
-    def test_strong_comparator_is_original_unchanged(self):
+    def test_strong_comparator_matches_completed_v3(self):
         q,r,p = GOOD_NMPC.arrays()
         np.testing.assert_allclose(q,[12.,3.,15.,6.,183.75,192.5])
         np.testing.assert_allclose(r,[.6,16.])
-        np.testing.assert_allclose(p,15*q)
+        np.testing.assert_allclose(p,20*q)
         # Comparators do not alias each other.
         a=LEARNING_INITIAL.arrays()
         q[0]=999
@@ -35,16 +35,16 @@ class ScreeningSpecTests(unittest.TestCase):
         self.assertEqual(a[0][0],12.)
 
     def test_candidate_box_contains_both_in_strict_interior(self):
-        low, high=screening_box(.20)
+        low, high=screening_box(.40)
         initial=LEARNING_INITIAL.arrays()
         fixed=GOOD_NMPC.arrays()
         self.assertEqual([len(x) for x in low],[6,2,6])
-        np.testing.assert_allclose(low[0],[9.6,2.4,6.,4.8,80.,80.])
-        np.testing.assert_allclose(high[0],[14.4,3.6,18.,7.2,220.5,231.])
-        np.testing.assert_allclose(low[1],[.48,12.8])
-        np.testing.assert_allclose(high[1],[.72,38.4])
-        np.testing.assert_allclose(low[2],[76.8,19.2,48.,38.4,640.,640.])
-        np.testing.assert_allclose(high[2],[216.,54.,270.,108.,3307.5,3465.])
+        np.testing.assert_allclose(low[0],[7.2,1.8,9.,3.6,60.45,60.45])
+        np.testing.assert_allclose(high[0],[16.8,4.2,70.,8.4,257.25,269.5])
+        np.testing.assert_allclose(low[1],[.36,6.])
+        np.testing.assert_allclose(high[1],[7.,22.4])
+        np.testing.assert_allclose(low[2],[72.,18.,180.,36.,604.5,604.5])
+        np.testing.assert_allclose(high[2],[336.,84.,700.,168.,5145.,5390.])
         for bounds_l,bounds_u,a,b in zip(low,high,initial,fixed):
             self.assertTrue(np.all(bounds_l<a))
             self.assertTrue(np.all(a<bounds_u))
