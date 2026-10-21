@@ -55,8 +55,10 @@ The deterministic initialized Actor returns the provided baseline Q/R.
 **All physical Q/R bounds and Gaussian sigma limits are required
 constructor arguments.** Synthetic bound values in unit tests are
 illustrative only: they are NOT a certified admissible stability domain.
-No training driver, gradient optimizer or test-track selection is shipped
-at this stage. The Critic remains a six-parameter non-NN TD(0) model.
+A gated, TRAIN-SHA256-locked single-transition and short-episode
+training driver with explicit SGD learning rates is now available; no long
+TRAIN episode or held-out TEST evaluation has been executed. The
+Critic remains a six-parameter non-NN TD(0) model.
 
 ## Source files
 
@@ -64,6 +66,8 @@ at this stage. The Critic remains a six-parameter non-NN TD(0) model.
 |---|---|
 | `nmpc_casadi/gaussian_weight_actor.py` | User-approved Actor plus 17-feature fixed physical normalization |
 | `nmpc_casadi/test_gaussian_weight_actor.py` | Independent Gaussian forward/sampling/score-gradient tests |
+| `nmpc_casadi/audit_critic_returns.py` | TRAIN-only finite-episode discounted-cost and Direct-P representability audit for explicit gamma choices |
+| `nmpc_casadi/test_critic_return_audit.py` | Numeric regression, bounds, gamma/terminal and TRAIN-only diagnostics tests |
 | `nmpc_casadi/audit_training_reward.py` | Compare old fixed reward Qe/Re candidate and pre-update initial TD on TRAIN screening trajectories |
 | `nmpc_casadi/actor_critic_updates.py` | One source-faithful shared TD(0) update for Actor and six-parameter Critic |
 | `nmpc_casadi/train_rl_environment.py` | Live Actor weights → adaptive-cost NMPC → plant → reward |
@@ -92,7 +96,7 @@ a second time.
 ```powershell
 git status --short
 git pull --ff-only
-python -m unittest -v test_gaussian_weight_actor test_screen_training_weights test_actor_critic_training test_actor_critic_nmpc_integration test_rl_paper_core test_direct_p_critic test_nmpc_core
+python -m unittest -v test_gaussian_weight_actor test_screen_training_weights test_actor_critic_training test_critic_return_audit test_actor_critic_nmpc_integration test_rl_paper_core test_direct_p_critic test_nmpc_core
 ```
 
 To start from another directory instead, navigate to the existing local
@@ -128,15 +132,29 @@ for the explicit exploratory bounds, pinned SHA256 of
 and training blockers. The TRAIN CSV exists only in the user's local
 working tree, not on GitHub. GitHub CI does not run those TRAIN sweeps.
 
-## Before full RL training
+## Before long RL training
 
-The **Actor and direct-P Critic mathematics are implemented and tested
-independently**. Actual positive parameter bounds `Q/R/P`, sigma
-lower/upper and initial sigma, optimizer, learning rates, reward/evaluation
-weights, offline admissibility and terminal-conditions screening, and
-training/validation split decisions are still pending. Paper Remark 5
-requires more than positivity/projection to claim stable closed-loop
-behavior. We will not use held-out TEST to tune bounds or checkpoints.
+The Actor, direct-P Critic, and one-step live CasADi integration are
+implemented and tested. Candidate 2 is the approved learning start.
+A 27/27 empirical PASS full TRAIN screening supports only an
+**exploratory Q/R/P domain**; the paper's terminal-set and recursive
+feasibility guarantees remain unproven. The old `Qe/Re`, gamma=0.99,
+sigma and learning rates remain **experimental candidates**, not
+paper-prescribed or fully approved.
+
+The first 10-step TRAIN RL smoke completed with 100% solver success,
+but the Critic's physical P coefficients barely moved. Before changing
+rates or running longer training, use the new
+[audit_critic_returns.py](nmpc_casadi/audit_critic_returns.py) to
+compare 27 fixed-policy TRAIN finite discounted returns with initial
+P, the best box-bounded six-P approximation, and a deliberately
+non-admissible unrestricted LS diagnostic. See
+[DIRECT_P_RETURN_AUDIT.md](DIRECT_P_RETURN_AUDIT.md)
+for full instructions and limitations. This is an offline *batch
+representability* audit, NOT an alternative TD(0) learner, and does not
+substitute for frozen-policy evaluation on held-out TEST.
+Paper Remark 5 still requires more than positivity/projection to
+claim stability.
 
 See [PAPER_IMPLEMENTATION_CONTRACT.md](PAPER_IMPLEMENTATION_CONTRACT.md)
 and [NMPC_THEORY_AUDIT.md](NMPC_THEORY_AUDIT.md).
