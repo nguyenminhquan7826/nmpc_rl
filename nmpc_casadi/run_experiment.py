@@ -82,6 +82,14 @@ def _validate_config():
         if (factors.shape!=(n,) or not np.all(np.isfinite(factors))
             or np.any(factors<=0)):
             raise ValueError(f"{name} must contain {n} positive finite entries")
+    for name in ("SOLVER_FAILURE_PENALTY","FAILURE_TERMINAL_PENALTY",
+                 "ACTOR_MU_REG_COEF"):
+        value=float(getattr(cfg,name,0.))
+        if not np.isfinite(value) or value<0:
+            raise ValueError(f"{name} must be nonnegative finite")
+    threshold=float(getattr(cfg,"ACTOR_MU_REG_THRESHOLD",2.))
+    if not np.isfinite(threshold) or threshold<=0.:
+        raise ValueError("ACTOR_MU_REG_THRESHOLD must be strictly positive finite")
     if not cfg.EVALUATE_SAME_TRAIN_TRACK:
         raise ValueError("This run requires a frozen evaluation to compare learning")
     if cfg.REWARD_CANDIDATE!="legacy":
@@ -106,6 +114,10 @@ def train_argv(checkpoints):
         "--sigma-upper",str(cfg.SIGMA_MAX),
         "--actor-lr",str(cfg.ACTOR_LR),
         "--critic-lr",str(cfg.CRITIC_LR),
+        "--solver-failure-penalty",str(getattr(cfg,"SOLVER_FAILURE_PENALTY",0.)),
+        "--failure-terminal-penalty",str(getattr(cfg,"FAILURE_TERMINAL_PENALTY",0.)),
+        "--actor-mu-reg-coef",str(getattr(cfg,"ACTOR_MU_REG_COEF",0.)),
+        "--actor-mu-reg-threshold",str(getattr(cfg,"ACTOR_MU_REG_THRESHOLD",2.)),
         "--actor-output-scales",*(str(x) for x in cfg.ACTOR_OUTPUT_LR_FACTORS),
         "--critic-component-scales",*(str(x) for x in cfg.CRITIC_P_LR_FACTORS),
         "--episodes",str(cfg.EPISODES),
@@ -188,6 +200,12 @@ def main():
         "status":"TRAIN_RUN_AND_FROZEN_EVALUATION_COMPLETE",
         "data_role":"TRAIN_ONLY","train_sha256":digest,
         "gamma":cfg.GAMMA, "episodes":cfg.EPISODES,
+        "experiment_variant":"D_training_safety_plus_actor_mu_regularization",
+        "train_solver_failure_penalty":getattr(cfg,"SOLVER_FAILURE_PENALTY",0.),
+        "train_failure_terminal_penalty":getattr(cfg,"FAILURE_TERMINAL_PENALTY",0.),
+        "actor_mu_reg_coef":getattr(cfg,"ACTOR_MU_REG_COEF",0.),
+        "actor_mu_reg_threshold":getattr(cfg,"ACTOR_MU_REG_THRESHOLD",2.),
+        "evaluation_reward_type":"paper_eq4_unmodified",
         "actor_output_lr_factors":list(cfg.ACTOR_OUTPUT_LR_FACTORS),
         "critic_p_lr_factors":list(cfg.CRITIC_P_LR_FACTORS),
         "checkpoints_1based":list(checkpoints),
