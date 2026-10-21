@@ -1,4 +1,4 @@
-# ONE COMMAND — 100 episodes, auto-evaluate, save tracking/Q/R/Qf images
+# ONE COMMAND — gamma=.90, 10-episode componentwise Critic LR pilot, auto-evaluate, save tracking/Q/R/Qf images
 
 The simplified experiment was requested to avoid repeatedly typing
 `--screen-manifest`, `--reward-audit-summary` and numerous result paths.
@@ -121,11 +121,13 @@ python run_experiment.py
 per-episode output folders.
 
 Current `experiment_config.py` defaults are explicit:
-`EPISODES=100`, `STEPS_PER_EPISODE=1150`, `GAMMA=.90`,
+`EPISODES=10`, `STEPS_PER_EPISODE=1150`, `GAMMA=.90`,
 `SEED=0`, `SIGMA_MIN=.02`, `SIGMA_INIT=.10`,
 `SIGMA_MAX=.30`, `ACTOR_LR=1e-6`,
-`CRITIC_LR=1e-3`, `WEIGHT_BOX_MARGIN=.20`,
-`CHECKPOINT_EPISODES=(1,10,25,50,100)`.
+`CRITIC_LR=1e-2`, `WEIGHT_BOX_MARGIN=.20`,
+`CHECKPOINT_EPISODES=(1,5,10)`, 
+`CRITIC_P_LR_FACTORS=(1.23,.86,.25,.41,1.84,1.85)` and
+`ACTOR_OUTPUT_LR_FACTORS=(1.,)*8`.
 
 The fixed task reward remains Eq.(4), with legacy experimental
 `Qe=[20,20,100,20,600,600]`,
@@ -148,10 +150,10 @@ Every episode: collect *actual sampled* Q/R means, six learned
 Critic physical P (the stage NMPC terminal Qf diagonal) at episode
 end, reward and TD. To avoid 200+ log/checkpoint files, detailed
 per-step CSV and checkpoints are saved only after episodes
-1, 10, 25, 50, 100. A complete `training_history.csv` is
+1, 5 and 10 for the Critic-LR pilot. A complete `training_history.csv` is
 maintained every episode.
 
-After episode 100, the runner freezes each selected checkpoint
+After episode 10, the runner freezes each selected checkpoint
 (no stochastic Actor sampling, no gradients) and compares against:
 
 - Initial untrained deterministic Actor and P;
@@ -169,11 +171,11 @@ A separate PNG presents trajectory tracking; three others show
 Q, R, Qf vs TRAIN episode, plus reward/TD and frozen CTE curves.
 `comparison.csv` uses the same fixed reward for every controller.
 
-**Caveats:** This first 100-episode run uses one seed, one TRAIN
+**Caveats:** This pilot run uses one seed, one TRAIN
 path and one initial condition. It is NOT held-out TEST,
 and the exploratory parameter box is NOT a certified terminal
 stability region. If the Critic hardly changes, inspect learning
-rate and box bounds instead of claiming 100 episodes proved
+rate and box bounds instead of claiming the pilot proved
 learnability.
 
 ## D. Existing output safety
@@ -187,4 +189,19 @@ new *independent* experiment, manually archive completed
 Do NOT delete the original pinned `train_xref.csv`.
 
 Note that merely running `git pull` does NOT start training.
-The 100-episode loop is invoked only by `python run_experiment.py`.
+The training loop is invoked only by `python run_experiment.py`.
+
+## Pilot restart after a completed prior 100-episode experiment
+
+The previous completed TRAIN files in `results/` and `images/` must
+be preserved before any new run: this runner *refuses to overwrite*
+nonempty output folders. Move those two existing directories into
+an archival path **outside the checkout**, e.g. in your Documents
+folder, and confirm they contain your old CSV/PNG before running
+`python run_experiment.py`. Do not move, rename or delete the pinned
+`reference_split/train_xref.csv`. Do not modify TEST.
+
+Pilot purpose: compare changing ONLY Critic physical-P per-component
+learning rates against the original actor/critic 100-episode baseline.
+Actor still learns with its previous rate of 1e-6; only the Critic's
+learning rates change. No proof of optimality or stability is inferred.
