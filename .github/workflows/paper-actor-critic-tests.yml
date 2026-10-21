@@ -36,6 +36,8 @@ jobs:
         run: python -m unittest -v test_actor_critic_nmpc_integration
       - name: Frozen deterministic checkpoint evaluation including real CasADi solve
         run: python -m unittest -v test_frozen_actor_critic_eval
+      - name: Multi-checkpoint frozen learning curve integrity and TRAIN-only boundaries
+        run: python -m unittest -v test_evaluate_training_curve
       - name: Existing vehicle and NMPC baseline tests
         run: python -m unittest -v test_nmpc_core
       - name: Standalone baseline NMPC still works
