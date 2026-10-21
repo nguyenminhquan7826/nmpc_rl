@@ -24,9 +24,14 @@ def new_agents(seed=223):
 
 
 class IndependentLearningRateTests(unittest.TestCase):
-    def test_user_config_keeps_baseline_neutral_until_explicitly_changed(self):
+    def test_user_config_is_explicit_isolated_critic_pilot(self):
+        # Actor unchanged: only Critic changes for the 10-episode ablation.
         self.assertEqual(tuple(cfg.ACTOR_OUTPUT_LR_FACTORS),(1.,)*8)
-        self.assertEqual(tuple(cfg.CRITIC_P_LR_FACTORS),(1.,)*6)
+        self.assertEqual(tuple(cfg.CRITIC_P_LR_FACTORS),
+                         (1.23,.86,.25,.41,1.84,1.85))
+        self.assertEqual(cfg.CRITIC_LR,.01)
+        self.assertEqual(cfg.ACTOR_LR,1e-6)
+        self.assertEqual(cfg.GAMMA,.90)
 
     def test_actor_preconditioner_modifies_mu_sigma_and_shared_layers(self):
         a,_=new_agents()
