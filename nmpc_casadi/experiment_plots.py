@@ -70,17 +70,18 @@ def plot_trajectories(reference, traces, images_dir):
             lw=2.5,linestyle="--",label="Reference TRAIN")
     labels=list(traces)
     # Limit clutter while preserving final, initial and comparator curves.
+    learned=sorted(label for label in labels
+                   if label.startswith("trained_episode_"))
+    # Show initial, middle and final checkpoint for ANY length: 10, 100...
+    if len(learned)>3:
+        learned=[learned[0],learned[len(learned)//2],learned[-1]]
     preferred=[
         "untrained_deterministic",
-        "trained_episode_0001",
-        "trained_episode_0025",
-        "trained_episode_0100",
+        *learned,
         "strong_fixed_baseline",
         "stage_lower_terminal_upper",
     ]
-    selected=[x for x in preferred if x in traces]
-    if not selected:
-        selected=labels
+    selected=[x for x in preferred if x in traces] or labels
     for label in selected:
         log=traces[label]
         if not {"X_m","Y_m"}.issubset(log.columns):
