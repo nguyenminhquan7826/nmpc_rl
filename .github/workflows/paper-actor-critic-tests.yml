@@ -30,6 +30,8 @@ jobs:
         run: python -m unittest -v test_actor_critic_training
       - name: Finite discounted returns and bounded six-P representability audit
         run: python -m unittest -v test_critic_return_audit
+      - name: Positive no-upper 6P QR regression and policy-mixture diagnostics
+        run: python -m unittest -v test_positive_critic_fit
       - name: One real Actor to adaptive NMPC to plant TD0 smoke solve
         run: python -m unittest -v test_actor_critic_nmpc_integration
       - name: Existing vehicle and NMPC baseline tests
