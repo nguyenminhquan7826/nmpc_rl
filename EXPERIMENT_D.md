@@ -71,8 +71,9 @@ cd nmpc_casadi
 python .\run_experiment.py
 ```
 
-The new paths are `results_v3_D_penalty/` and
-`images_v3_D_penalty/`. The runner refuses to overwrite populated
+The next run's fresh paths are `results_v3_D_with_best/` and
+`images_v3_D_with_best/`. The already completed
+`results_v3_D_penalty/` archive is preserved. The runner refuses to overwrite populated
 output folders. Do not change the private TRAIN source.
 
 ## How to evaluate
@@ -99,3 +100,42 @@ policy that terminates early cannot win just by receiving fewer steps.
 In particular, compare checkpoint 25 vs checkpoint 100; one
 TRAIN seed and a single path do **not** establish TEST generalization.
 Do not choose final hyperparameters or a checkpoint using TEST data.
+
+## Best-episode preservation and diagnostics (subsequent runs)
+
+At **each** TRAIN episode, the driver checks whether the sampled
+trajectory both reached the end and had >=99% successful NMPC solves.
+Among these, the smallest stochastic per-step `mean_cte_m` wins
+(ties: higher original Eq.(4) `mean_reward`, earlier episode).
+A new winner updates:
+
+- `checkpoint_best_train.npz` (post-episode policy snapshot with metadata)
+- `episode_best_train.csv` (all sampled training steps of that episode)
+- `best_train_selection.json` (criterion and 1-based episode)
+- `best_train_episode.png` (CTE and both original/shaped rewards)
+
+Only **within the NEW output directory** are these best-train files
+replaced on improvement; historical experiment output folders remain
+untouched. If no episode completes reliably, no best-train checkpoint
+is claimed.
+
+After training, frozen deterministic evaluation runs the usual
+checkpoints (1,10,25,50,100) **plus** the best stochastic TRAIN checkpoint
+if it is not already on this list. Among these **evaluated** checkpoints,
+only full-path-completed, nonterminal, nontruncated trajectories with
+>=99% solver success can win. Smallest post-1.3m Mean CTE wins
+(ties: higher original Eq.(4) `mean_reward`). Outputs:
+
+- `checkpoint_best_frozen.npz` and `eval_best_frozen.csv`
+- `best_frozen_selection.json` with all evaluated candidate episodes
+- `best_frozen_trajectory.png`, `best_frozen_cte.png`,
+  `best_frozen_weights.png` (Q/R/Qf across TRAIN progress)
+
+The best stochastic TRAIN episode and best deterministic frozen
+checkpoint **may differ**. Evaluating the shortlisted stored checkpoints
+does **not** establish a global frozen optimum over all 100 episodes.
+The new feature does not select via TEST, modify Eq.(4) evaluation,
+or make stability guarantees. On the **historical** D results ZIP,
+TRAIN episode 14 was the minimum-CTE completed episode but its policy
+was never saved; among just the five saved frozen checkpoints, episode
+10 is the best full-route completed one.

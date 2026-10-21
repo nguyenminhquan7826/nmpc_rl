@@ -61,6 +61,29 @@ experiment does not silently remove research evidence.
 All data under `reference_split` is a TRAIN reference or derived
 nonphysical prediction tail, NOT an additional TEST track.
 
+## Best model and its actual training trajectory
+
+Run `python run_experiment.py` as usual. A new best completed training
+episode (solver success at least 99%, then lowest mean CTE) immediately
+saves `checkpoint_best_train.npz`, `episode_best_train.csv` and
+`best_train_selection.json` in the configured results folder, even when
+the episode is not in the scheduled checkpoint list.
+
+The CSV now contains actual pre-action `X_m`, `Y_m`, matching
+`X_ref_m`, `Y_ref_m`, `t_s`, and post-action `X_next_m`, `Y_next_m`.
+At experiment completion, `best_train_episode.png` in the configured
+images folder overlays this actual trajectory on the reference, including
+the final vehicle position, alongside CTE and reward panels. Older logs
+without XY retain the CTE/reward plot; no trajectory is reconstructed.
+
+The saved model is the model **after the last update** of that episode.
+The training trajectory includes exploration and online updates, so it
+is not a frozen replay of that checkpoint. The existing
+`checkpoint_best_frozen.npz`, `eval_best_frozen.csv` and
+`best_frozen_trajectory.png` report the best eligible deterministic
+evaluation among checkpoints actually evaluated. If no episode qualifies,
+no best model or trajectory is claimed. Learning rates are unchanged.
+
 ## Before the first run: pinned TRAIN file is local and gitignored
 
 The `reference_split/` folder is deliberately excluded from Git

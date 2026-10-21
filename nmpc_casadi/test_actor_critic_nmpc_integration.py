@@ -42,6 +42,10 @@ class JointNMPCSmokeTests(unittest.TestCase):
             proposed.q_diagonal,proposed.r_diagonal,critic,obs)
         self.assertTrue(details["solver_success"],
                         "Real adaptive NMPC solve should succeed")
+        np.testing.assert_allclose([details["X_m"],details["Y_m"]],obs.physical[4:6])
+        np.testing.assert_allclose([details["X_next_m"],details["Y_next_m"]],after.physical[4:6])
+        np.testing.assert_allclose([details["X_ref_m"],details["Y_ref_m"]],obs.reference["xref"][0,4:6])
+        self.assertEqual(details["t_s"],0.)
         self.assertEqual(after.features.shape,(17,))
         self.assertTrue(np.all(np.isfinite(after.features)))
         self.assertTrue(np.isfinite(reward))

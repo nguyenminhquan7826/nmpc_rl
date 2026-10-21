@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,10 +32,12 @@ os.environ["NMPC_RL_MINIMAL_LAYOUT"]="1"
 import baseline as b
 import experiment_config as cfg
 from audit_training_reward import Q_EVAL_CANDIDATE, R_EVAL_CANDIDATE
+from best_episode_selection import select_best_frozen_checkpoint
 from direct_p_critic import SixParameterTDCritic
 from evaluate_frozen_actor_critic import load_frozen_agents, frozen_rollout
 from experiment_plots import (plot_episode_weights,plot_trajectories,
-                              plot_frozen_comparison)
+                              plot_frozen_comparison,plot_best_train_episode,
+                              plot_best_frozen_episode)
 from screen_training_weights import verify_train_reference
 from train_reference_locator import resolve_train_reference
 from train_actor_critic import main as train_main
@@ -152,11 +155,29 @@ def evaluate_checkpoints(checkpoints):
         ("stage_lower_terminal_upper",FixedWeightActor(low[0],low[1]),
             _fixed_crit(high[2],low[2],high[2])),
     ]
+    checkpoint_sources={}
     for ep in checkpoints:
         ckpt=cfg.RESULTS_DIR/f"checkpoint_ep{ep-1:04d}.npz"
         _,(actor,critic),meta=load_frozen_agents(
             ckpt,low,high,expected_gamma=cfg.GAMMA)
-        policies.append((f"trained_episode_{ep:04d}",actor,critic))
+        label=f"trained_episode_{ep:04d}"
+        policies.append((label,actor,critic))
+        checkpoint_sources[label]=ckpt
+    best_train_manifest=cfg.RESULTS_DIR/"best_train_selection.json"
+    if best_train_manifest.is_file():
+        train_info=json.loads(best_train_manifest.read_text(encoding="utf-8"))
+        best_ep=int(train_info["episode_1based"])
+        if not 1<=best_ep<=cfg.EPISODES:
+            raise ValueError("Best TRAIN checkpoint has invalid episode")
+        label=f"trained_episode_{best_ep:04d}"
+        if label not in checkpoint_sources:
+            ckpt=cfg.RESULTS_DIR/"checkpoint_best_train.npz"
+            _,(actor,critic),meta=load_frozen_agents(
+                ckpt,low,high,expected_gamma=cfg.GAMMA)
+            if int(meta["checkpoint_episode"]) != best_ep-1:
+                raise ValueError("Best TRAIN checkpoint metadata episode mismatch")
+            policies.append((label,actor,critic))
+            checkpoint_sources[label]=ckpt
     summaries=[]
     traces={}
     for name,actor,critic in policies:
@@ -173,6 +194,40 @@ def evaluate_checkpoints(checkpoints):
         }),flush=True)
     frame=pd.DataFrame(summaries)
     frame.to_csv(cfg.RESULTS_DIR/"comparison.csv",index=False)
+    best=select_best_frozen_checkpoint(summaries)
+    if best is not None:
+        label=best["controller"]
+        episode=int(label.rsplit("_",1)[1])
+        ckpt=checkpoint_sources[label]
+        # Clear names make best policy usable without guessing epochs.
+        shutil.copy2(ckpt,cfg.RESULTS_DIR/"checkpoint_best_frozen.npz")
+        traces[label].to_csv(cfg.RESULTS_DIR/"eval_best_frozen.csv",index=False)
+        frozen_info={
+            "type":"BEST_DETERMINISTIC_FROZEN_TRAIN",
+            "episode_1based":episode,
+            "controller":label,
+            "criterion":"completed_and_solver_success_at_least_99_pct_then_min_post_1p3m_cte",
+            "mean_cte_post_m":float(best["mean_cte_post_m"]),
+            "max_cte_post_m":float(best["max_cte_post_m"]),
+            "mean_reward_paper":float(best["mean_reward"]),
+            "solver_success_pct":float(best["solver_success_pct"]),
+            "completion_pct":float(best["completion_pct"]),
+            "candidate_episodes_evaluated":sorted(int(x.rsplit("_",1)[1])
+                for x in checkpoint_sources),
+            "not_global_best_over_all_episodes":True,
+            "reference_role":"TRAIN_ONLY",
+            "uses_TEST":False,
+        }
+    else:
+        frozen_info={
+            "type":"NO_QUALIFYING_FROZEN_CHECKPOINT",
+            "criterion":"requires_completed_reached_end_and_solver_success_at_least_99_pct",
+            "candidate_episodes_evaluated":sorted(int(x.rsplit("_",1)[1])
+                for x in checkpoint_sources),
+            "reference_role":"TRAIN_ONLY","uses_TEST":False,
+        }
+    (cfg.RESULTS_DIR/"best_frozen_selection.json").write_text(
+        json.dumps(frozen_info,indent=2),encoding="utf-8")
     return frame,traces
 
 
@@ -196,6 +251,21 @@ def main():
     figs=plot_episode_weights(history,cfg.IMAGES_DIR)
     figs["tracking"]=plot_trajectories(cfg.TRAIN_CSV,traces,cfg.IMAGES_DIR)
     figs["frozen_cte"]=plot_frozen_comparison(comparison,cfg.IMAGES_DIR)
+    best_train_path=cfg.RESULTS_DIR/"best_train_selection.json"
+    train_best=(json.loads(best_train_path.read_text(encoding="utf-8"))
+                if best_train_path.is_file() else None)
+    if train_best is not None:
+        figs["best_train"]=plot_best_train_episode(
+            pd.read_csv(cfg.RESULTS_DIR/"episode_best_train.csv"),
+            train_best["episode_1based"],cfg.IMAGES_DIR)
+    frozen_best=json.loads(
+        (cfg.RESULTS_DIR/"best_frozen_selection.json").read_text(encoding="utf-8"))
+    if frozen_best["type"]=="BEST_DETERMINISTIC_FROZEN_TRAIN":
+        selected=frozen_best["controller"]
+        best_figs=plot_best_frozen_episode(
+            cfg.TRAIN_CSV,traces[selected],selected,cfg.IMAGES_DIR,
+            comparator_trace=traces.get("strong_fixed_baseline"))
+        figs.update({f"best_frozen_{k}":v for k,v in best_figs.items()})
     report={
         "status":"TRAIN_RUN_AND_FROZEN_EVALUATION_COMPLETE",
         "data_role":"TRAIN_ONLY","train_sha256":digest,
@@ -209,6 +279,8 @@ def main():
         "actor_output_lr_factors":list(cfg.ACTOR_OUTPUT_LR_FACTORS),
         "critic_p_lr_factors":list(cfg.CRITIC_P_LR_FACTORS),
         "checkpoints_1based":list(checkpoints),
+        "best_train_selection":train_best,
+        "best_frozen_selection":frozen_best,
         "fixed_reward_Qe":Q_EVAL_CANDIDATE.tolist(),
         "fixed_reward_Re":R_EVAL_CANDIDATE.tolist(),
         "experimental_QRP_domain_not_stability_certified":True,

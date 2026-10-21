@@ -36,8 +36,8 @@ class MinimalLayoutTests(unittest.TestCase):
 
     def test_layout_has_only_two_new_output_roots_and_pinned_source(self):
         self.assertEqual(cfg.TRAIN_CSV.parent,cfg.TRAJECTORY_DIR)
-        self.assertEqual(cfg.RESULTS_DIR.name,"results_v3_D_penalty")
-        self.assertEqual(cfg.IMAGES_DIR.name,"images_v3_D_penalty")
+        self.assertEqual(cfg.RESULTS_DIR.name,"results_v3_D_with_best")
+        self.assertEqual(cfg.IMAGES_DIR.name,"images_v3_D_with_best")
         self.assertEqual(cfg.GAMMA,.9)
         self.assertEqual(cfg.EPISODES,100)
         self.assertEqual(cfg.CHECKPOINT_EPISODES,(1,10,25,50,100))
