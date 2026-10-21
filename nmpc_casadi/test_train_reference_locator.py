@@ -134,7 +134,7 @@ class PinnedTrainLocatorTests(unittest.TestCase):
                                dest,source=source,
                                expected_sha256=file_sha256(source))):
                     epochs,digest=runner._validate_config()
-                self.assertEqual(len(epochs),5)
+                self.assertEqual(tuple(epochs),(1,5,10))
                 self.assertEqual(target.read_bytes(),source.read_bytes())
                 self.assertEqual(digest,file_sha256(source))
 
