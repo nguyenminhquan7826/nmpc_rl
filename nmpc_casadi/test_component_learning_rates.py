@@ -24,16 +24,19 @@ def new_agents(seed=223):
 
 
 class IndependentLearningRateTests(unittest.TestCase):
-    def test_user_config_is_explicit_joint_actor_critic_lr_pilot(self):
-        # User intentionally increased Actor LR and both R output factors.
+    def test_user_config_d_reproduces_completed_v3_settings(self):
         self.assertEqual(tuple(cfg.ACTOR_OUTPUT_LR_FACTORS),
-                         (1.,1.,1.,1.,1.,1.,1.8,1.8))
+                         (1.,1.,1.,1.,2.5,2.5,1.,1.))
         self.assertEqual(tuple(cfg.CRITIC_P_LR_FACTORS),
-                         (1.23,.86,.25,.41,1.84,1.85))
-        self.assertEqual(cfg.CRITIC_LR,.001)
-        self.assertEqual(cfg.ACTOR_LR,.001)
+                         (1.23,.86,.25,.41,2.5,2.5))
+        self.assertEqual(cfg.CRITIC_LR,1e-4)
+        self.assertEqual(cfg.ACTOR_LR,1e-4)
         self.assertEqual(cfg.GAMMA,.90)
-        self.assertEqual(cfg.EPISODES,10)
+        self.assertEqual(cfg.WEIGHT_BOX_MARGIN,.40)
+        self.assertEqual(cfg.EPISODES,100)
+        self.assertEqual(cfg.SOLVER_FAILURE_PENALTY,10.)
+        self.assertEqual(cfg.FAILURE_TERMINAL_PENALTY,100.)
+        self.assertEqual(cfg.ACTOR_MU_REG_COEF,1e-3)
 
     def test_actor_preconditioner_modifies_mu_sigma_and_shared_layers(self):
         a,_=new_agents()
