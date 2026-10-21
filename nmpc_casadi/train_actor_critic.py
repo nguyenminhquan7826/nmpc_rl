@@ -157,12 +157,19 @@ def main(argv=None):
             "reference_file":TRAJECTORY_DIR/"_rl_validated_train_copy.csv",
             "tail_file":TRAJECTORY_DIR/"_rl_prediction_tail.csv",
         }
-        if any(target.exists() for target in targets.values()):
-            raise FileExistsError(
-                "Generated TRAIN trajectory/tail already exist. "
-                "Preserve prior inputs or move archival derivatives first.")
+        from cad_eval_reference import sha256_file
         for key,target in targets.items():
-            shutil.move(str(staged[key]),str(target))
+            source_derivative=Path(staged[key])
+            if target.exists():
+                # Only reuse byte-identical derived trajectories. Refuse to
+                # overwrite user-modified files; remove only our OWN freshly
+                # generated temporary copy, not prior experiment outputs.
+                if sha256_file(target)!=sha256_file(source_derivative):
+                    raise FileExistsError(
+                        f"Existing derived TRAIN CSV differs: {target}")
+                source_derivative.unlink()
+            else:
+                shutil.move(str(source_derivative),str(target))
             staged[key]=str(target)
     b.REF_INFO=ref_info
     b.TAIL_FILE=Path(staged["tail_file"])
