@@ -1,4 +1,7 @@
-"""One verified TD(0)+Gaussian policy-gradient transition, no reward shaping.
+"""One verified TD(0)+Gaussian policy-gradient transition.
+
+Optional experiment D actor regularization and externally computed TRAIN
+safety-penalized reward; paper Eq.(4) functions are unmodified.
 
 Actor uses the *same pre-update* TD as Critic. The sampled Gaussian latent
 action is detached in the score function. The 6 physical Critic coefficients
@@ -36,6 +39,7 @@ def learn_one_transition(
     error, next_error, reward, *,
     gamma, actor_lr, critic_lr, terminated=False,
     actor_output_scales=None, critic_component_scales=None,
+    actor_mu_reg_coef=0.0, actor_mu_reg_threshold=2.0,
 ):
     if not isinstance(actor, GaussianWeightActor) or not isinstance(
         critic, SixParameterTDCritic
@@ -71,6 +75,8 @@ def learn_one_transition(
         np.asarray(sampled_latent,float)[None,:],
         np.array([delta],float),
         output_gradient_scale=actor_factors,
+        mu_regularization_coef=actor_mu_reg_coef,
+        mu_regularization_threshold=actor_mu_reg_threshold,
     )
     candidates={
         k:actor.params[k]-float(actor_lr)*g
