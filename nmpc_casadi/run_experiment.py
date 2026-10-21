@@ -36,6 +36,7 @@ from evaluate_frozen_actor_critic import load_frozen_agents, frozen_rollout
 from experiment_plots import (plot_episode_weights,plot_trajectories,
                               plot_frozen_comparison)
 from screen_training_weights import verify_train_reference
+from train_reference_locator import resolve_train_reference
 from train_actor_critic import main as train_main
 from train_rl_environment import TrainEnvironment
 from training_initialization import (
@@ -80,7 +81,9 @@ def _validate_config():
         raise ValueError("This run requires a frozen evaluation to compare learning")
     if cfg.REWARD_CANDIDATE!="legacy":
         raise ValueError("Unknown fixed reward candidate")
-    _, digest=verify_train_reference(cfg.TRAIN_CSV)
+    resolved=resolve_train_reference(
+        cfg.TRAIN_CSV,source=cfg.TRAIN_CSV_SOURCE)
+    _, digest=verify_train_reference(resolved)
     return checkpoints,digest
 
 
