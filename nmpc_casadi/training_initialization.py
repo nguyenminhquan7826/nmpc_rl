@@ -30,16 +30,16 @@ class FixedWeights:
 
 # Actual config.json uploaded by user for the second candidate.
 LEARNING_INITIAL = FixedWeights(
-    q=(12., 3., 7.5, 6., 100., 100.),
-    r=(.6, 32.),
-    p=(96., 24., 60., 48., 800., 800.),
+    q=(12., 3., 50, 6., 100.75, 100.75),
+    r=(5, 10.),
+    p=10*np.array((12., 3., 50, 6., 100.75, 100.75)),
 )
 
 # Independent strong baseline from unchanged fixed NMPC in baseline.py.
 GOOD_NMPC = FixedWeights(
     q=(12., 3., 15., 6., 183.75, 192.5),
     r=(.6, 16.),
-    p=(180., 45., 225., 90., 2756.25, 2887.5),
+    p=20*np.array((12., 3., 15., 6., 183.75, 192.5))
 )
 
 
