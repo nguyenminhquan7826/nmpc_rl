@@ -36,6 +36,19 @@ INITIAL_HEADING_DEG = 0.
 # First comparison deliberately retains prior pilot's optimizer scales.
 ACTOR_LR = 1e-6
 CRITIC_LR = 1e-3
+
+# Per-component learning-rate multipliers (controlled ablation).
+# Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].
+# The eight multipliers precondition BOTH Gaussian mean/sigma gradients
+# and their contributions to the shared hidden layers.
+# CRITIC order: Qf=P[vx,vy,psi,r,X,Y]; direct six-parameter TD updates.
+#
+# Start with ones to reproduce the 100-episode baseline exactly.
+# Measure statewise TD*e_i**2 and output score-gradient RMS on TRAIN
+# before experimenting with non-unit values. Changes require a NEW
+# empty results/images folder and explicit scientific comparison.
+ACTOR_OUTPUT_LR_FACTORS = (1., 1., 1., 1., 1., 1., 1., 1.)
+CRITIC_P_LR_FACTORS = (1., 1., 1., 1., 1., 1.)
 SIGMA_MIN = .02
 SIGMA_INIT = .10
 SIGMA_MAX = .30
