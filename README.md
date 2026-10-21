@@ -72,6 +72,9 @@ Critic remains a six-parameter non-NN TD(0) model.
 | `nmpc_casadi/actor_critic_updates.py` | One source-faithful shared TD(0) update for Actor and six-parameter Critic |
 | `nmpc_casadi/train_rl_environment.py` | Live Actor weights → adaptive-cost NMPC → plant → reward |
 | `nmpc_casadi/train_actor_critic.py` | Gated TRAIN-only short/long episodes, per-step diagnostics, checkpoints |
+| `nmpc_casadi/experiment_config.py` | Central gamma, train episodes, learning parameters and three filesystem roots |
+| `nmpc_casadi/run_experiment.py` | One-command train, frozen comparative evaluation and figures |
+| `nmpc_casadi/experiment_plots.py` | Actual X/Y path tracking, Q/R/Qf weights and learning curves |
 | `nmpc_casadi/evaluate_frozen_actor_critic.py` | Reproduce deterministic untrained/frozen learned NMPC and compare to 3 fixed TRAIN screening controllers |
 | `nmpc_casadi/evaluate_training_curve.py` | Replay 1,10,25,50,100-episode frozen checkpoints, compare same TRAIN conditions and fixed baselines |
 | `nmpc_casadi/test_evaluate_training_curve.py` | Validate long-run checkpoint selection and strict gamma/TRAIN-only boundaries |
@@ -135,6 +138,26 @@ for the explicit exploratory bounds, pinned SHA256 of
 3-case quick and 27-case full empirical screening, numerical limitations
 and training blockers. The TRAIN CSV exists only in the user's local
 working tree, not on GitHub. GitHub CI does not run those TRAIN sweeps.
+
+## Simplified experiment — no manifest/audit arguments, just three folders
+
+The user-requested, source-configured **one-command** workflow is now
+[ONE_COMMAND_EXPERIMENT.md](ONE_COMMAND_EXPERIMENT.md):
+
+```powershell
+python run_experiment.py
+```
+
+Edit `experiment_config.py` to change 100 episodes, `gamma=.90`,
+learning rates, exploration sigma, checkpoint intervals and the
+three paths. The runner requires ONLY the pinned existing
+`reference_split/train_xref.csv` and writes flat numerical files
+to `results/` and real vehicle tracking / Q-R-Qf figures to
+`images/`. No external screening manifest or reward audit
+file is required in this simplified mode; archived scientific
+evidence and the legacy scripts remain available and unchanged.
+Source-defined candidate box is *exploratory only*, not certified
+for adaptive policy stability.
 
 ## Approved gamma 0.90 first episode and frozen TRAIN evaluation
 
