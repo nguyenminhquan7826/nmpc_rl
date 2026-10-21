@@ -14,7 +14,7 @@ from actor_critic_updates import learn_one_transition
 from direct_p_critic import SixParameterTDCritic
 from gaussian_weight_actor import GaussianWeightActor
 from rl_paper_core import paper_reward
-from train_actor_critic import read_screened_box
+from train_actor_critic import read_screened_box, verify_reward_audit
 from training_initialization import LEARNING_INITIAL, TRAIN_REFERENCE_SHA256, screening_box
 
 
@@ -125,6 +125,25 @@ class TrainingContractTests(unittest.TestCase):
             learn_one_transition(
                 a,c,np.zeros(17),np.zeros(8),np.zeros(6),np.zeros(6),-1.,
                 gamma=.99,actor_lr=.001,critic_lr=.01,terminated=1)
+
+    def test_long_training_reward_audit_must_match_gamma_and_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"summary.json"
+            doc={
+                "type":"TRAIN_ONLY_FIXED_REWARD_CANDIDATE_NO_LEARNING",
+                "train_sha256":TRAIN_REFERENCE_SHA256,
+                "cases":27,"gamma_diagnostic":.99,
+                "Qe":Q_EVAL_CANDIDATE.tolist(),
+                "Re":R_EVAL_CANDIDATE.tolist(),
+            }
+            path.write_text(json.dumps(doc))
+            self.assertEqual(verify_reward_audit(path,.99)["cases"],27)
+            with self.assertRaisesRegex(ValueError,"27-case"):
+                verify_reward_audit(path,.95)
+            doc["cases"]=3
+            path.write_text(json.dumps(doc))
+            with self.assertRaisesRegex(ValueError,"27-case"):
+                verify_reward_audit(path,.99)
 
     def test_full_27_pass_screening_manifest_required(self):
         lower,upper=screening_box(.2)
