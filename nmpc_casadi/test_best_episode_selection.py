@@ -1,6 +1,7 @@
 """Best-episode selection and figures: deterministic, TRAIN-only, synthetic data."""
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,29 @@ def frozen(ep,cte,*,complete=True,solver=100.,failure=False,
 
 
 class BestEpisodeTests(unittest.TestCase):
+    def test_best_training_xy_uses_logged_positions_and_final_endpoint(self):
+        import experiment_plots as plots
+        df=pd.DataFrame({
+            "progress_m":[0.,1.],"cte_m":[.05,.02],"reward":[-2.,-1.],
+            "X_m":[0.,1.],"Y_m":[.05,.02],
+            "X_ref_m":[0.,1.],"Y_ref_m":[0.,0.],
+            "X_next_m":[1.,2.],"Y_next_m":[.02,.01],
+        })
+        original_save=plots._save
+        with tempfile.TemporaryDirectory() as tmp:
+            def check_and_save(fig,target):
+                self.assertEqual(len(fig.axes),3)
+                ref,actual=fig.axes[0].lines
+                np.testing.assert_allclose(ref.get_ydata(),[0.,0.])
+                np.testing.assert_allclose(actual.get_xdata(),[0.,1.,2.])
+                np.testing.assert_allclose(actual.get_ydata(),[.05,.02,.01])
+                return original_save(fig,target)
+            with patch.object(plots,"_save",side_effect=check_and_save):
+                self.assertTrue(Path(plot_best_train_episode(df,92,tmp)).is_file())
+            df.loc[0,"X_m"]=np.nan
+            with self.assertRaisesRegex(ValueError,"Non-finite"):
+                plot_best_train_episode(df,92,tmp)
+
     def test_stochastic_best_requires_completion_and_solver_reliability(self):
         records=[
             train(0,.07),train(1,.001,complete=False),

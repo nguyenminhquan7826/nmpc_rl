@@ -128,7 +128,33 @@ def plot_best_train_episode(trace, episode_1based, images_dir):
     required=("cte_m","reward","progress_m")
     if df.empty or any(x not in df for x in required):
         raise ValueError("Missing best TRAIN episode tracking/reward data")
-    fig,axes=plt.subplots(2,1,figsize=(10,7),sharex=True)
+    xy_columns=("X_m","Y_m","X_ref_m","Y_ref_m")
+    has_xy=all(column in df for column in xy_columns)
+    if has_xy and not np.isfinite(df[list(xy_columns)].to_numpy(float)).all():
+        raise ValueError("Non-finite best TRAIN episode XY data")
+    fig,axes=plt.subplots(3 if has_xy else 2,1,
+                          figsize=(10,13 if has_xy else 7))
+    if has_xy:
+        xy=axes[0]
+        x=df["X_m"].to_numpy(float)
+        y=df["Y_m"].to_numpy(float)
+        if all(column in df for column in ("X_next_m","Y_next_m")):
+            endpoint=df[["X_next_m","Y_next_m"]].iloc[-1].to_numpy(float)
+            if not np.isfinite(endpoint).all():
+                plt.close(fig)
+                raise ValueError("Non-finite best TRAIN endpoint")
+            x=np.r_[x,endpoint[0]]
+            y=np.r_[y,endpoint[1]]
+        xy.plot(df["X_ref_m"],df["Y_ref_m"],"k--",label="Reference TRAIN")
+        xy.plot(x,y,label=f"Actual stochastic episode {episode_1based}")
+        xy.scatter(x[0],y[0],marker="o",label="Start",zorder=3)
+        xy.scatter(x[-1],y[-1],marker="x",label="End",zorder=3)
+        xy.set(xlabel="X (m)",ylabel="Y (m)",
+               title="Best TRAIN episode: actual vehicle trajectory")
+        xy.set_aspect("equal",adjustable="datalim")
+        xy.legend(loc="best")
+        xy.grid(alpha=.25)
+        axes=axes[1:]
     axes[0].plot(df["progress_m"],100.*df["cte_m"])
     axes[0].set(ylabel="CTE (cm)",
                 title=f"Best stochastic TRAIN episode {episode_1based} — completed")

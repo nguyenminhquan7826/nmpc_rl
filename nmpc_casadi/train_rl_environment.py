@@ -154,6 +154,13 @@ class TrainEnvironment:
             "reached_end":reached,"failure_terminal":catastrophic,
             "progress_m":float(next_obs.reference["projection"]["s"]),
             "cte_m":float(pre.reference["projection"]["distance"]),
+            # Log physical XY directly, aligned with the pre-action error.
+            # Keep the final post-action point so plots include the endpoint.
+            "t_s":float((self.k-1)*b.Ts),
+            "X_m":float(x0[4]),"Y_m":float(x0[5]),
+            "X_ref_m":float(pre.reference["xref"][0,4]),
+            "Y_ref_m":float(pre.reference["xref"][0,5]),
+            "X_next_m":float(self.x[4]),"Y_next_m":float(self.x[5]),
             "du_a":float(du[0]),"du_delta":float(du[1]),
             "a":float(u[0]),"steering":float(u[1]),
         }

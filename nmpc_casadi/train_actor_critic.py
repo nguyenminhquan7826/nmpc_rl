@@ -392,6 +392,10 @@ def main(argv=None):
                 "reached_end":True,
                 "source":"TRAIN_ONLY",
                 "not_frozen_evaluation":True,
+                "checkpoint_file":"checkpoint_best_train.npz",
+                "trajectory_file":"episode_best_train.csv",
+                "checkpoint_timing":"after_final_episode_update",
+                "trajectory_role":"actual_online_learning_with_exploration_not_checkpoint_replay",
             }
             select_tmp=out/"best_train_selection.tmp.json"
             select_tmp.write_text(json.dumps(selection,indent=2),encoding="utf-8")
