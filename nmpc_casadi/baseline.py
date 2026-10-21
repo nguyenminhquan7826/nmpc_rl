@@ -1,5 +1,6 @@
 import argparse
 import gc
+import os
 import itertools
 import re
 import time
@@ -36,31 +37,26 @@ ABORT_AFTER_CONSECUTIVE_SOLVER_FAILS = 3  # abort after 3 FINAL failures
 ENABLE_FRESH_ROLLOUT_FALLBACK = True
 
 BASE = Path(__file__).resolve().parent
-RESULTS = BASE / "sweep_results"
-RESULTS.mkdir(parents=True, exist_ok=True)
+# Legacy NMPC commands retain EXACT previous directories. Only the new
+# one-command RL experiment opts into the flat three-folder layout.
+_RL_MINIMAL_LAYOUT = os.environ.get("NMPC_RL_MINIMAL_LAYOUT") == "1"
+RESULTS = BASE / ("results" if _RL_MINIMAL_LAYOUT else "sweep_results")
+if not _RL_MINIMAL_LAYOUT:
+    RESULTS.mkdir(parents=True, exist_ok=True)
 CASES_DIR = RESULTS / "cases"
-CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 ROBUST_CASES_DIR = RESULTS / "robustness_cases"
-ROBUST_CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 INITIAL_ROBUST_CASES_DIR = RESULTS / "initial_robustness_cases"
-INITIAL_ROBUST_CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 BOUNDARY_CASES_DIR = RESULTS / "boundary_cases"
-BOUNDARY_CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 SOLVER_DIAG_DIR = RESULTS / "solver_diagnostic"
-SOLVER_DIAG_DIR.mkdir(parents=True, exist_ok=True)
-
 COMBINED_CASES_DIR = RESULTS / "combined_robustness_cases"
-COMBINED_CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 QRQF_REGION_CASES_DIR = RESULTS / "qrqf_region_cases"
-QRQF_REGION_CASES_DIR.mkdir(parents=True, exist_ok=True)
-
 QRQF_STRESS_CASES_DIR = RESULTS / "qrqf_stress_cases"
-QRQF_STRESS_CASES_DIR.mkdir(parents=True, exist_ok=True)
+if not _RL_MINIMAL_LAYOUT:
+    for subdir in (CASES_DIR, ROBUST_CASES_DIR,
+                   INITIAL_ROBUST_CASES_DIR, BOUNDARY_CASES_DIR,
+                   SOLVER_DIAG_DIR, COMBINED_CASES_DIR,
+                   QRQF_REGION_CASES_DIR, QRQF_STRESS_CASES_DIR):
+        subdir.mkdir(parents=True, exist_ok=True)
 
 # Exact Q/R/Qf tuning base used when case_071 was selected.
 # IMPORTANT: this is intentionally NOT the later frozen controller Q/R.
@@ -92,7 +88,12 @@ if not REF_SOURCE.exists():
 # The reference tail is used only by the prediction horizon. The real CAD path
 # still ends at CAD_S_END and the closed-loop simulation stops there.
 TAIL_LENGTH_M = 0.20
-TAIL_FILE = RESULTS / "_xref_with_virtual_tail.csv"
+TAIL_FILE = (
+    BASE / "reference_split" / "_nmpc_initial_reference_tail.csv"
+    if _RL_MINIMAL_LAYOUT else RESULTS / "_xref_with_virtual_tail.csv"
+)
+if _RL_MINIMAL_LAYOUT:
+    TAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 # Initial condition used for every Q/R/Qf candidate.
 START_X = 0
