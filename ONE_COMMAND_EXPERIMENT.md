@@ -61,6 +61,53 @@ experiment does not silently remove research evidence.
 All data under `reference_split` is a TRAIN reference or derived
 nonphysical prediction tail, NOT an additional TEST track.
 
+## Before the first run: pinned TRAIN file is local and gitignored
+
+The `reference_split/` folder is deliberately excluded from Git
+to keep research CSV inputs private. Thus a fresh cloned repo or
+switching to a separately checked-out source directory does **not**
+install `train_xref.csv` by using `git pull`.
+
+Starting with this revision, `python run_experiment.py` performs a
+bounded, read-only search of nearby project checkouts and saved
+`cad_eval_source_xref.csv` copies from previous training runs.
+It restores a local copy into
+`reference_split/train_xref.csv` **only if its SHA256 is exactly**
+`afa67ac24ef61b591b1a16498bcb1ee5e521452cf0f8036de00923d062940b98`.
+It will never synthesize TRAIN from the two tracked historical
+`xref_states_*.csv` files, nor read `test_xref.csv`.
+It refuses to overwrite an existing (even corrupted) TRAIN CSV.
+
+If your original TRAIN lies outside the nearby checkout search,
+set the single Python variable in `experiment_config.py`:
+
+```python
+TRAIN_CSV_SOURCE = Path(r"D:\\some-existing-old-checkout\\reference_split\\train_xref.csv")
+```
+
+This configuration variable is optional; no CLI arguments.
+Another option is to **copy the original** pinned file manually into
+the new checkout's `reference_split/` folder. Do not rename
+`xref_states_smoothed.csv` as train data.
+
+Windows PowerShell can find the original location if needed:
+
+```powershell
+Get-ChildItem "D:\\GitHub\\RL_NMPC" -Recurse -File -Filter train_xref.csv -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty FullName
+```
+
+Once found, verify the SHA before reuse:
+
+```powershell
+(Get-FileHash "FULL_PATH_TO_TRAIN_XREF_CSV" -Algorithm SHA256).Hash
+```
+
+If no matching local source exists, 100-episode learning
+**must not** start; re-create TRAIN from the original sanctioned
+TRAIN/TEST split procedure, with matching provenance, rather
+than guessing a different file.
+
 ## B. Run
 
 In PowerShell within `nmpc_casadi`:
