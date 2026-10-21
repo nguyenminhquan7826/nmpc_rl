@@ -33,7 +33,8 @@ SEED = 0
 INITIAL_EY_M = .05
 INITIAL_HEADING_DEG = 0.
 
-# Gamma .90 pilot: change Critic Qf update rates ONLY. Actor is frozen\n# in learning-rate *settings*, NOT frozen NN weights; it keeps training.
+# Gamma .90 pilot: change Critic Qf update rates ONLY. Actor is frozen
+# in learning-rate *settings*, NOT frozen NN weights; it keeps training.
 ACTOR_LR = 1e-6
 CRITIC_LR = 1e-2
 
