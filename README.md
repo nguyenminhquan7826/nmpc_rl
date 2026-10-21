@@ -72,6 +72,8 @@ Critic remains a six-parameter non-NN TD(0) model.
 | `nmpc_casadi/actor_critic_updates.py` | One source-faithful shared TD(0) update for Actor and six-parameter Critic |
 | `nmpc_casadi/train_rl_environment.py` | Live Actor weights → adaptive-cost NMPC → plant → reward |
 | `nmpc_casadi/train_actor_critic.py` | Gated TRAIN-only short/long episodes, per-step diagnostics, checkpoints |
+| `nmpc_casadi/evaluate_frozen_actor_critic.py` | Reproduce deterministic untrained/frozen learned NMPC and compare to 3 fixed TRAIN screening controllers |
+| `nmpc_casadi/test_frozen_actor_critic_eval.py` | Checkpoint metadata/gamma and real one-step CasADi frozen inference tests |
 | `nmpc_casadi/test_actor_critic_training.py` | Test reward / TD and same TD update, terminal handling, audit gate |
 | `nmpc_casadi/test_actor_critic_nmpc_integration.py` | One ACTUAL CasADi solve with Actor, direct P, paper reward and TD |
 | `nmpc_casadi/training_initialization.py` | User-approved learning start: candidate 2; unchanged strong NMPC comparator; exploratory box |
@@ -131,6 +133,17 @@ for the explicit exploratory bounds, pinned SHA256 of
 3-case quick and 27-case full empirical screening, numerical limitations
 and training blockers. The TRAIN CSV exists only in the user's local
 working tree, not on GitHub. GitHub CI does not run those TRAIN sweeps.
+
+## Approved gamma 0.90 first episode and frozen TRAIN evaluation
+
+The user approved `gamma=0.90`. The local Windows training run and
+deterministic checkpoint evaluation are documented with exact PowerShell
+commands in [RUN_GAMMA090_ONE_EPISODE.md](RUN_GAMMA090_ONE_EPISODE.md).
+The one-episode experiment is not run in GitHub CI because the pinned
+TRAIN reference and 27 fixed-screen trajectories remain on the user's
+local machine. The code is CI-tested on a bundled reference for one
+end-to-end real CasADi step. The inherited sigma and learning rates
+remain diagnostic, not approved optimal settings.
 
 ## Before long RL training
 
