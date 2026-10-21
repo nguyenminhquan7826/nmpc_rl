@@ -18,12 +18,16 @@ results_screen/results_rl material unchanged; these are archival.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 
+# Set BEFORE importing baseline: the previous standalone NMPC scripts retain
+# their old sweep_results outputs, while this runner creates no such folders.
+os.environ["NMPC_RL_MINIMAL_LAYOUT"]="1"
 import baseline as b
 import experiment_config as cfg
 from audit_training_reward import Q_EVAL_CANDIDATE, R_EVAL_CANDIDATE
