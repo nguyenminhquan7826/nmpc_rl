@@ -19,6 +19,10 @@ TRAJECTORY_DIR = BASE_DIR / "reference_split"
 RESULTS_DIR = BASE_DIR / "results"
 IMAGES_DIR = BASE_DIR / "images"
 TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
+# Optional only if your original pinned TRAIN lives in another checkout
+# and the bounded automatic local search cannot locate it:
+# TRAIN_CSV_SOURCE = Path(r"D:\\your\\old\\project\\reference_split\\train_xref.csv")
+TRAIN_CSV_SOURCE = None
 
 # Keep strictly away from TEST until all training decisions are fixed.
 EPISODES = 100
