@@ -32,9 +32,12 @@ class JointNMPCSmokeTests(unittest.TestCase):
             task_qe=qe,task_re=re,
             max_steps=1,ey=.05,heading_deg=0.)
         obs=env.observe()
-        proposed=actor.propose(obs.features,deterministic=True)
-        np.testing.assert_allclose(proposed.q_diagonal,q,atol=1e-12)
-        np.testing.assert_allclose(proposed.r_diagonal,r,atol=1e-12)
+        initial_mean=actor.propose(obs.features,deterministic=True)
+        np.testing.assert_allclose(initial_mean.q_diagonal,q,atol=1e-12)
+        np.testing.assert_allclose(initial_mean.r_diagonal,r,atol=1e-12)
+        # The live transition must use a GENUINE stochastic Gaussian action.
+        proposed=actor.propose(obs.features,deterministic=False)
+        self.assertGreater(np.linalg.norm(proposed.latent-initial_mean.latent),0.)
         after,reward,terminal,truncated,details=env.step(
             proposed.q_diagonal,proposed.r_diagonal,critic,obs)
         self.assertTrue(details["solver_success"],
