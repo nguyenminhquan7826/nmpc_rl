@@ -16,8 +16,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v3_D_penalty"
-IMAGES_DIR = BASE_DIR / "images_v3_D_penalty"
+RESULTS_DIR = BASE_DIR / "results_v3_D_with_best"
+IMAGES_DIR = BASE_DIR / "images_v3_D_with_best"
 TRAIN_CSV = TRAJECTORY_DIR / "train_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
