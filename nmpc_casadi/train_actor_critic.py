@@ -21,8 +21,9 @@ import pandas as pd
 import baseline as b
 from audit_training_reward import Q_EVAL_CANDIDATE, R_EVAL_CANDIDATE
 from actor_critic_updates import learn_one_transition
+from experiment_d_penalties import compute_training_reward
 from cad_eval_reference import prepare_cad_evaluation_reference
-from gaussian_weight_actor import GaussianWeightActor
+from gaussian_weight_actor import GaussianWeightActor, actor_mu_excess_squared
 from direct_p_critic import SixParameterTDCritic
 from rl_paper_core import td_error
 from screen_training_weights import verify_train_reference
@@ -95,6 +96,14 @@ def main(argv=None):
                     metavar=("Qvx","Qvy","Qpsi","Qr","QX","QY","Ra","Rdelta"))
     ap.add_argument("--critic-component-scales",type=float,nargs=6,
                     metavar=("Pvx","Pvy","Ppsi","Pr","PX","PY"))
+    ap.add_argument("--solver-failure-penalty",type=float,default=0.,
+                    help="TRAIN-only penalty after BOTH NMPC solve attempts fail")
+    ap.add_argument("--failure-terminal-penalty",type=float,default=0.,
+                    help="TRAIN-only catastrophic terminal penalty")
+    ap.add_argument("--actor-mu-reg-coef",type=float,default=0.,
+                    help="Actor-only latent-mean squared-hinge loss coefficient")
+    ap.add_argument("--actor-mu-reg-threshold",type=float,default=2.,
+                    help="Latent-mean absolute value threshold for regularization")
     ap.add_argument("--episodes",type=int,required=True)
     ap.add_argument("--steps-per-episode",type=int,required=True)
     ap.add_argument("--seed",type=int,default=0)
@@ -112,6 +121,13 @@ def main(argv=None):
         v=getattr(args,k)
         if not np.isfinite(v) or v<=0:
             ap.error(f"{k} must be positive finite")
+    for k in ("solver_failure_penalty","failure_terminal_penalty",
+              "actor_mu_reg_coef"):
+        v=getattr(args,k)
+        if not np.isfinite(v) or v<0.:
+            ap.error(f"{k} must be nonnegative finite")
+    if not np.isfinite(args.actor_mu_reg_threshold) or args.actor_mu_reg_threshold<=0.:
+        ap.error("actor_mu_reg_threshold must be strictly positive finite")
     if args.use_internal_box and args.screen_manifest is not None:
         ap.error("Choose either source-defined box or external screen manifest")
     if not args.use_internal_box and args.screen_manifest is None:
@@ -212,7 +228,14 @@ def main(argv=None):
         "R_lower":lo[1].tolist(),"R_upper":hi[1].tolist(),
         "P_lower":lo[2].tolist(),"P_upper":hi[2].tolist(),
         "Qe_fixed":qe.tolist(),"Re_fixed":re.tolist(),
-        "reward_type":"paper_eq4_no_failure_penalty_no_reward_shaping",
+        "reward_type":("paper_eq4_plus_train_only_safety_penalties"
+                       if args.solver_failure_penalty>0. or args.failure_terminal_penalty>0.
+                       else "paper_eq4_no_failure_penalty_no_reward_shaping"),
+        "evaluation_reward_type":"paper_eq4_only",
+        "train_solver_failure_penalty":args.solver_failure_penalty,
+        "train_failure_terminal_penalty":args.failure_terminal_penalty,
+        "actor_mu_reg_coef":args.actor_mu_reg_coef,
+        "actor_mu_reg_threshold":args.actor_mu_reg_threshold,
         "actor_arch":"17-64-64-tanh-learned_mu8_learned_sigma8",
         "critic_arch":"direct_six_physical_P_no_NN",
         "actor_optimizer":"SGD_paper_score_function",
@@ -253,16 +276,33 @@ def main(argv=None):
             p_before=critic.p
             next_obs,reward,terminated,truncated,info=env.step(
                 proposal.q_diagonal,proposal.r_diagonal,critic,obs)
+            breakdown=compute_training_reward(
+                reward,info,
+                solver_failure_penalty=args.solver_failure_penalty,
+                failure_terminal_penalty=args.failure_terminal_penalty)
+            mu_excess_sq=float(actor_mu_excess_squared(
+                proposal.mu,args.actor_mu_reg_threshold))
             update=learn_one_transition(
                 actor,critic,obs.features,proposal.latent,
-                obs.error,next_obs.error,reward,
+                obs.error,next_obs.error,breakdown.training_reward,
                 gamma=args.gamma,actor_lr=args.actor_lr,
                 critic_lr=args.critic_lr,terminated=terminated,
                 actor_output_scales=args.actor_output_scales,
-                critic_component_scales=args.critic_component_scales)
+                critic_component_scales=args.critic_component_scales,
+                actor_mu_reg_coef=args.actor_mu_reg_coef,
+                actor_mu_reg_threshold=args.actor_mu_reg_threshold)
             row={
                 "episode":ep,"step":step,
-                "reward":reward,"td":update.td,
+                # reward always refers to the unchanged Eq.(4) task metric.
+                "reward":reward,
+                "training_reward":breakdown.training_reward,
+                "penalty_solver":breakdown.solver_penalty,
+                "penalty_terminal":breakdown.terminal_penalty,
+                "actor_mu_excess_sq":mu_excess_sq,
+                "actor_mu_regularization":args.actor_mu_reg_coef*mu_excess_sq,
+                "actor_mu_beyond_threshold":int(np.sum(
+                    np.abs(proposal.mu)>args.actor_mu_reg_threshold)),
+                "td":update.td,
                 "value_now":update.value_current,
                 "value_next":update.value_next,
                 "critic_loss":update.critic_loss,
@@ -296,6 +336,14 @@ def main(argv=None):
             "episode":ep,"steps":len(df),
             "return":float(df.reward.sum()),
             "mean_reward":float(df.reward.mean()),
+            "training_return":float(df.training_reward.sum()),
+            "mean_training_reward":float(df.training_reward.mean()),
+            "penalty_solver_total":float(df.penalty_solver.sum()),
+            "penalty_terminal_total":float(df.penalty_terminal.sum()),
+            "actor_mu_regularization_mean":float(df.actor_mu_regularization.mean()),
+            "actor_mu_excess_sq_mean":float(df.actor_mu_excess_sq.mean()),
+            "actor_mu_fraction_beyond_threshold":float(
+                df.actor_mu_beyond_threshold.mean()/8.),
             "rms_td":float(np.sqrt(np.mean(df.td**2))),
             "actor_grad_norm_max":float(df.actor_grad_norm.max()),
             "critic_step_norm_max":float(df.critic_param_step_norm.max()),
