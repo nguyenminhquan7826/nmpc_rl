@@ -35,6 +35,7 @@ def learn_one_transition(
     observation, sampled_latent,
     error, next_error, reward, *,
     gamma, actor_lr, critic_lr, terminated=False,
+    actor_output_scales=None, critic_component_scales=None,
 ):
     if not isinstance(actor, GaussianWeightActor) or not isinstance(
         critic, SixParameterTDCritic
@@ -45,6 +46,22 @@ def learn_one_transition(
             raise ValueError(f"{name} must be positive finite")
     if not isinstance(terminated, (bool,np.bool_)):
         raise ValueError("terminated must be bool (time-limit != termination)")
+    if actor_output_scales is None:
+        actor_factors=None
+    else:
+        actor_factors=np.asarray(actor_output_scales,dtype=float)
+        if (actor_factors.shape!=(8,) or
+            not np.all(np.isfinite(actor_factors)) or
+            np.any(actor_factors<=0)):
+            raise ValueError("actor_output_scales must be 8 finite positive scalars")
+    if critic_component_scales is None:
+        critic_factors=np.ones(6,dtype=float)
+    else:
+        critic_factors=np.asarray(critic_component_scales,dtype=float)
+        if (critic_factors.shape!=(6,) or
+            not np.all(np.isfinite(critic_factors)) or
+            np.any(critic_factors<=0)):
+            raise ValueError("critic_component_scales must be 6 finite positive scalars")
     value_now=critic.value(error)
     value_next=0. if terminated else critic.value(next_error)
     delta=float(td_error(reward,value_now,value_next,gamma))
@@ -53,6 +70,7 @@ def learn_one_transition(
         np.asarray(observation,float)[None,:],
         np.asarray(sampled_latent,float)[None,:],
         np.array([delta],float),
+        output_gradient_scale=actor_factors,
     )
     candidates={
         k:actor.params[k]-float(actor_lr)*g
@@ -60,8 +78,10 @@ def learn_one_transition(
     }
     if any(not np.all(np.isfinite(x)) for x in candidates.values()):
         raise FloatingPointError("Actor candidate SGD weights nonfinite")
-    result=critic.td_step(error,next_error,reward,gamma,critic_lr,
-                          terminated=bool(terminated))
+    result=critic.td_step(
+        error,next_error,reward,gamma,
+        float(critic_lr)*critic_factors,
+        terminated=bool(terminated))
     if not np.isclose(result.td_error,delta,rtol=1e-12,atol=1e-12):
         raise RuntimeError("Actor and Critic TD mismatch")
     for key,updated in candidates.items():
