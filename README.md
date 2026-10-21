@@ -2,7 +2,7 @@
 
 **Status:** Paper equations + **exactly six directly learned Critic P
 parameters** + the NMPC cost-parameter bridge are implemented and tested.
-**The Actor NN is implemented and independently tested. The full RL training loop is NOT implemented yet.**
+**The Gaussian Actor, direct-P Critic, initial live Actor–Critic–NMPC TD(0) training driver, and independent/integration tests are implemented. Full TRAIN episodes and held-out TEST evaluation have NOT been run.**
 
 This branch intentionally builds on the NMPC-only controller in
 `experiment/direct-quadratic-td-critic`; its independent NMPC baseline
@@ -64,6 +64,12 @@ at this stage. The Critic remains a six-parameter non-NN TD(0) model.
 |---|---|
 | `nmpc_casadi/gaussian_weight_actor.py` | User-approved Actor plus 17-feature fixed physical normalization |
 | `nmpc_casadi/test_gaussian_weight_actor.py` | Independent Gaussian forward/sampling/score-gradient tests |
+| `nmpc_casadi/audit_training_reward.py` | Compare old fixed reward Qe/Re candidate and pre-update initial TD on TRAIN screening trajectories |
+| `nmpc_casadi/actor_critic_updates.py` | One source-faithful shared TD(0) update for Actor and six-parameter Critic |
+| `nmpc_casadi/train_rl_environment.py` | Live Actor weights → adaptive-cost NMPC → plant → reward |
+| `nmpc_casadi/train_actor_critic.py` | Gated TRAIN-only short/long episodes, per-step diagnostics, checkpoints |
+| `nmpc_casadi/test_actor_critic_training.py` | Test reward / TD and same TD update, terminal handling, audit gate |
+| `nmpc_casadi/test_actor_critic_nmpc_integration.py` | One ACTUAL CasADi solve with Actor, direct P, paper reward and TD |
 | `nmpc_casadi/training_initialization.py` | User-approved learning start: candidate 2; unchanged strong NMPC comparator; exploratory box |
 | `nmpc_casadi/screen_training_weights.py` | TRAIN SHA256-locked empirical screening of representative Q/R/P weight triples |
 | `nmpc_casadi/test_screen_training_weights.py` | Test start/compared weights, candidate bounds, strict TRAIN checksum and failure reporting |
@@ -86,7 +92,7 @@ a second time.
 ```powershell
 git status --short
 git pull --ff-only
-python -m unittest -v test_gaussian_weight_actor test_screen_training_weights test_rl_paper_core test_direct_p_critic test_nmpc_core
+python -m unittest -v test_gaussian_weight_actor test_screen_training_weights test_actor_critic_training test_actor_critic_nmpc_integration test_rl_paper_core test_direct_p_critic test_nmpc_core
 ```
 
 To start from another directory instead, navigate to the existing local
