@@ -6,6 +6,7 @@ fixed-NMPC simulator. This environment makes no stability theorem claim.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import time
 import numpy as np
 
 import baseline as b
@@ -94,6 +95,7 @@ class TrainEnvironment:
         primary=False
         violation=float("inf")
         attempts=0
+        solve_start=time.perf_counter()
         for attempt in range(2):
             attempts+=1
             guess=self.guess if attempt==0 else b.build_fresh_dynamics_rollout_guess(
@@ -121,6 +123,7 @@ class TrainEnvironment:
                     break
             except Exception:
                 success=False
+        elapsed_ms=1000.*(time.perf_counter()-solve_start)
         if not success:
             u=prev.copy()
             self.fail_streak+=1
@@ -142,6 +145,8 @@ class TrainEnvironment:
         self.done=terminated or truncated
         return next_obs,reward,terminated,truncated,{
             "step":self.k,"solver_success":success,
+            "solve_ms":float(elapsed_ms),
+            "deadline_missed":bool(elapsed_ms>b.DEADLINE_MS),
             "solver_primary_success":primary,"solver_attempts":attempts,
             "max_constraint_violation":violation,
             "invalid_plant_state":invalid,
