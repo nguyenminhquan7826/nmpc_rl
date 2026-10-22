@@ -228,3 +228,37 @@ Pilot purpose: compare changing ONLY Critic physical-P per-component
 learning rates against the original actor/critic 100-episode baseline.
 Actor still learns with its previous rate of 1e-6; only the Critic's
 learning rates change. No proof of optimality or stability is inferred.
+
+## Online adaptation: keep Actor and Critic learning after training
+
+`RUN_ONLINE_ADAPTATION = True` in `experiment_config.py` adds an online
+rollout after frozen comparison, starting from the best frozen checkpoint
+(or best TRAIN checkpoint if no frozen checkpoint qualifies).
+Set it to `False` to disable. Frozen comparison is preserved separately.
+
+Each step samples Gaussian Actor actions, applies Q/R and current Qf to
+NMPC, then updates all Actor NN parameters and the six direct Critic P
+parameters using the same pre-update TD. The next step uses updated
+models. This is online learning on TRAIN, not independent frozen testing.
+The Critic has no neural network. Projection at a bound may keep P flat.
+
+Files in `RESULTS_DIR/online_adaptation/`:
+- `online_episode.csv`: applied q/r/p, p_after, TD, Actor/Critic parameter
+  step norms, XY, solver diagnostics and task/learning rewards.
+- `checkpoint_after_online.npz`: final updated model; original untouched.
+- `online_summary.json`: metrics, source checkpoint, adaptation seed/mode.
+- `online_weights.png`, `online_trajectory.png`, `online_qf_change.png`.
+
+To adapt an existing checkpoint without retraining, from nmpc_casadi:
+
+```powershell
+python online_adaptation.py --checkpoint results_v1/checkpoint_best_frozen.npz --reference reference_split/train_xref.csv --output online_results_v1 --max-steps 1150 --seed 0
+```
+
+Replace folder names with your paths. Output must be empty. Bounds, gamma,
+LRs, factors and penalties come from checkpoint metadata, not the current
+margin config. Task reward is separate from penalized learning reward.
+ONLINE_ADAPTATION_SEED starts a new sampling stream, not exact RNG resume.
+The final model is saved without claiming it is a best checkpoint.
+The reference must match pinned TRAIN; no held-out TEST tuning is done.
+Full online runs require that local TRAIN CSV, which is not stored in Git.

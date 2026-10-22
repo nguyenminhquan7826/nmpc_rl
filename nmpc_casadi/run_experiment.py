@@ -266,7 +266,27 @@ def main():
             cfg.TRAIN_CSV,traces[selected],selected,cfg.IMAGES_DIR,
             comparator_trace=traces.get("strong_fixed_baseline"))
         figs.update({f"best_frozen_{k}":v for k,v in best_figs.items()})
+    online_summary=None
+    if getattr(cfg,"RUN_ONLINE_ADAPTATION",False):
+        from online_adaptation import run_from_checkpoint
+        checkpoint=cfg.RESULTS_DIR/"checkpoint_best_frozen.npz"
+        if not checkpoint.is_file():
+            checkpoint=cfg.RESULTS_DIR/"checkpoint_best_train.npz"
+        if checkpoint.is_file():
+            q0,r0,p0=LEARNING_INITIAL.arrays()
+            online_env=TrainEnvironment(
+                train_length_m=b.CAD_S_END,q_initial=q0,r_initial=r0,p_initial=p0,
+                task_qe=Q_EVAL_CANDIDATE,task_re=R_EVAL_CANDIDATE,
+                max_steps=cfg.STEPS_PER_EPISODE,ey=cfg.INITIAL_EY_M,
+                heading_deg=cfg.INITIAL_HEADING_DEG)
+            online_summary=run_from_checkpoint(online_env,checkpoint,
+                cfg.RESULTS_DIR/"online_adaptation",
+                seed=getattr(cfg,"ONLINE_ADAPTATION_SEED",cfg.SEED))
+            print(json.dumps(online_summary),flush=True)
+        else:
+            online_summary={"status":"SKIPPED_NO_QUALIFYING_CHECKPOINT"}
     report={
+        "online_adaptation":online_summary,
         "status":"TRAIN_RUN_AND_FROZEN_EVALUATION_COMPLETE",
         "data_role":"TRAIN_ONLY","train_sha256":digest,
         "gamma":cfg.GAMMA, "episodes":cfg.EPISODES,
