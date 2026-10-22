@@ -94,6 +94,8 @@ def main(argv=None):
     ap.add_argument("--sigma-upper",type=float,required=True)
     ap.add_argument("--actor-lr",type=float,required=True)
     ap.add_argument("--critic-lr",type=float,required=True)
+    ap.add_argument("--critic-update-mode",choices=("semi_gradient","residual_gradient"),
+                    default="semi_gradient")
     ap.add_argument("--actor-output-scales",type=float,nargs=8,
                     metavar=("Qvx","Qvy","Qpsi","Qr","QX","QY","Ra","Rdelta"))
     ap.add_argument("--critic-component-scales",type=float,nargs=6,
@@ -241,7 +243,8 @@ def main(argv=None):
         "actor_arch":"17-64-64-tanh-learned_mu8_learned_sigma8",
         "critic_arch":"direct_six_physical_P_no_NN",
         "actor_optimizer":"SGD_paper_score_function",
-        "critic_optimizer":"projected_TD0_semi_gradient",
+        "critic_optimizer":"projected_TD0_"+args.critic_update_mode,
+        "critic_update_mode":args.critic_update_mode,
         "actor_lr":args.actor_lr,"critic_lr":args.critic_lr,
         "actor_output_lr_factors": (
             list(args.actor_output_scales) if args.actor_output_scales is not None
@@ -252,7 +255,7 @@ def main(argv=None):
             else [1.]*6
         ),
         "actor_gradient_mode":"per_output_score_preconditioning_before_shared_backprop",
-        "critic_gradient_mode":"per_component_projected_TD0",
+        "critic_gradient_mode":"per_component_projected_TD0_"+args.critic_update_mode,
         "gamma":args.gamma,
         "sigma_lower":args.sigma_lower,
         "sigma_initial":args.sigma_initial,
@@ -292,6 +295,7 @@ def main(argv=None):
                 critic_lr=args.critic_lr,terminated=terminated,
                 actor_output_scales=args.actor_output_scales,
                 critic_component_scales=args.critic_component_scales,
+                critic_update_mode=args.critic_update_mode,
                 actor_mu_reg_coef=args.actor_mu_reg_coef,
                 actor_mu_reg_threshold=args.actor_mu_reg_threshold)
             row={
@@ -329,6 +333,8 @@ def main(argv=None):
                 for i,value in enumerate(vector):
                     row[f"{name}_{i}"]=float(value)
             rows.append(row)
+            row.update({f"critic_gradient_{i}":float(v)
+                        for i,v in enumerate(update.critic_gradient)})
             obs=next_obs
             if terminated or truncated:
                 break
@@ -367,6 +373,8 @@ def main(argv=None):
             record[f"qf_final_{i}"]=float(value)
         record["sigma_mean_episode"]=float(df["sigma_mean"].mean())
         record["qf_step_total"]=float(df["critic_param_step_norm"].sum())
+        for i in range(6):
+            record[f"mean_critic_gradient_{i}"]=float(df[f"critic_gradient_{i}"].mean())
         history.append(record)
         best=select_best_train_episode(history)
         record["is_best_train_so_far"]=bool(

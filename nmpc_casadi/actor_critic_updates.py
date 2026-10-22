@@ -30,6 +30,7 @@ class TrainingStep:
     value_current: float
     value_next: float
     reward: float
+    critic_gradient: tuple[float, ...]
 
 
 def learn_one_transition(
@@ -40,6 +41,7 @@ def learn_one_transition(
     gamma, actor_lr, critic_lr, terminated=False,
     actor_output_scales=None, critic_component_scales=None,
     actor_mu_reg_coef=0.0, actor_mu_reg_threshold=2.0,
+    critic_update_mode="semi_gradient",
 ):
     if not isinstance(actor, GaussianWeightActor) or not isinstance(
         critic, SixParameterTDCritic
@@ -66,6 +68,8 @@ def learn_one_transition(
             not np.all(np.isfinite(critic_factors)) or
             np.any(critic_factors<=0)):
             raise ValueError("critic_component_scales must be 6 finite positive scalars")
+    if critic_update_mode not in ("semi_gradient","residual_gradient"):
+        raise ValueError("Unknown Critic update mode")
     value_now=critic.value(error)
     value_next=0. if terminated else critic.value(next_error)
     delta=float(td_error(reward,value_now,value_next,gamma))
@@ -87,7 +91,7 @@ def learn_one_transition(
     result=critic.td_step(
         error,next_error,reward,gamma,
         float(critic_lr)*critic_factors,
-        terminated=bool(terminated))
+        terminated=bool(terminated),update_mode=critic_update_mode)
     if not np.isclose(result.td_error,delta,rtol=1e-12,atol=1e-12):
         raise RuntimeError("Actor and Critic TD mismatch")
     for key,updated in candidates.items():
@@ -99,4 +103,5 @@ def learn_one_transition(
         critic_param_step_norm=float(np.linalg.norm(
             np.asarray(result.p_after)-np.asarray(result.p_before))),
         value_current=value_now,value_next=value_next,reward=float(reward),
+        critic_gradient=result.gradient,
     )

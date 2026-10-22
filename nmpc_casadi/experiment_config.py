@@ -37,6 +37,7 @@ INITIAL_HEADING_DEG = 0.
 # The two TRAIN-only penalties are exploratory; no stability certificate.
 ACTOR_LR = 1e-5
 CRITIC_LR = 4
+CRITIC_UPDATE_MODE = "residual_gradient"  # "semi_gradient" restores baseline
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].

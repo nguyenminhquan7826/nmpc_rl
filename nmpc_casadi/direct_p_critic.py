@@ -13,8 +13,11 @@ multi-step target, gradient normalization/clipping, or hidden reward shaping.
 The caller provides positive physically meaningful bounds, an initial P,
 gamma and the learning rate; they are NOT silently chosen here.
 
-This semi-gradient TD(0) treats the bootstrap target as constant during a
-single update. The six p_i are in PHYSICAL Qf units, not normalized features.
+Default semi-gradient TD(0) treats the bootstrap target as constant.
+Optional residual_gradient differentiates sampled squared TD loss through
+both value estimates with transition data fixed. It is not an unbiased
+gradient of squared expected Bellman error in stochastic environments.
+The six p_i are in PHYSICAL Qf units, not normalized features.
 """
 from __future__ import annotations
 
@@ -60,6 +63,8 @@ class CriticStep:
     p_before: tuple[float, ...]
     p_after: tuple[float, ...]
     terminated: bool
+    gradient: tuple[float, ...]
+    update_mode: str
 
 
 class SixParameterTDCritic:
@@ -98,7 +103,8 @@ class SixParameterTDCritic:
         e = _six_finite(error, "error")
         return -float(np.dot(self._p, e**2))
 
-    def td_step(self, error, next_error, reward, gamma, learning_rate, *, terminated=False):
+    def td_step(self, error, next_error, reward, gamma, learning_rate, *,
+                terminated=False, update_mode="semi_gradient"):
         """Perform exactly one projected TD(0) semi-gradient step.
 
         learning_rate may be a scalar, or exactly six positive component
@@ -107,10 +113,13 @@ class SixParameterTDCritic:
 
         For terminal=true, the future value is zero. A time-limit truncation
         must be passed as terminated=false so it continues to bootstrap.
-        No derivative is taken through next_error or the next-state value.
+        In residual_gradient mode, differentiate next-state VALUE as well,
+        holding next_error fixed. Terminal transitions omit the bootstrap.
         """
         e = _six_finite(error, "error")
         en = _six_finite(next_error, "next_error")
+        if update_mode not in ("semi_gradient","residual_gradient"):
+            raise ValueError("Unknown Critic update_mode")
         if isinstance(terminated, (bool, np.bool_)):
             terminated = bool(terminated)
         else:
@@ -132,7 +141,11 @@ class SixParameterTDCritic:
         # dL/dp_i = (V(s)-target) * dV/dp_i = delta * e_i**2
         # because V=-sum(p_i*e_i**2), delta=target-V.
         semi_grad = d * e**2
-        new_p = project_box_admissible(before - rate*semi_grad,
+        # Full derivative of sampled squared TD loss with transition fixed.
+        # No differentiation through the plant, NMPC or Actor.
+        gradient = (semi_grad if update_mode=="semi_gradient" else
+                    d*(e**2-(0.0 if terminated else float(gamma))*en**2))
+        new_p = project_box_admissible(before - rate*gradient,
                                       self.lower, self.upper)
         self._p = new_p.copy()
         return CriticStep(
@@ -144,4 +157,6 @@ class SixParameterTDCritic:
             p_before=tuple(float(x) for x in before),
             p_after=tuple(float(x) for x in self._p),
             terminated=terminated,
+            gradient=tuple(float(x) for x in gradient),
+            update_mode=update_mode,
         )

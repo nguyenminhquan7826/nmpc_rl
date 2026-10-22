@@ -38,6 +38,7 @@ def adaptive_rollout(env, actor, critic, config):
             terminated=terminated,
             actor_output_scales=config.get("actor_output_lr_factors"),
             critic_component_scales=config.get("critic_p_lr_factors"),
+            critic_update_mode=config.get("critic_update_mode","semi_gradient"),
             actor_mu_reg_coef=config.get("actor_mu_reg_coef",0.),
             actor_mu_reg_threshold=config.get("actor_mu_reg_threshold",2.))
         row={**diag,"controller":"online_adaptation",
@@ -57,12 +58,15 @@ def adaptive_rollout(env, actor, critic, config):
                               ("sigma",proposal.sigma)):
             row.update({f"{prefix}_{i}":float(v) for i,v in enumerate(values)})
         rows.append(row)
+        row.update({f"critic_gradient_{i}":float(v)
+                    for i,v in enumerate(update.critic_gradient)})
         obs=nxt
         if terminated or truncated:
             break
     log=pd.DataFrame(rows)
     summary=metrics_from_rows(log,config["gamma"],b.CAD_S_END)
     summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log),
+                   critic_update_mode=config.get("critic_update_mode","semi_gradient"),
                    action_mode="sampled_gaussian",reached_end=bool(log.reached_end.iloc[-1]),
                    failure_terminal=bool(log.failure_terminal.iloc[-1]),
                    terminated=bool(log.terminated.iloc[-1]),
