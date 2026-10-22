@@ -262,3 +262,17 @@ ONLINE_ADAPTATION_SEED starts a new sampling stream, not exact RNG resume.
 The final model is saved without claiming it is a best checkpoint.
 The reference must match pinned TRAIN; no held-out TEST tuning is done.
 Full online runs require that local TRAIN CSV, which is not stored in Git.
+
+## Signed TD diagnostics for every training episode
+
+New runs write mean_td, rms_td, mean_abs_td, std_td, negative_td_pct,
+positive_td_pct and mean_td_e2_0 through mean_td_e2_5 in training_history.csv
+and the JSON console record for EVERY episode, regardless of --save-at.
+mean_td_e2_i is mean(delta * e_i^2), before LR scaling and projection.
+It describes the raw component update direction, not the actual bounded step.
+
+training_reward_td.png now has three separate panels: mean task reward,
+signed mean TD with a zero reference, and RMS TD. No sign is inferred from
+RMS. Old histories lacking mean_td explicitly display it as unavailable.
+Use a new results/images directory when retraining to preserve prior outputs.
+Learning rates, bounds, rewards and update formulas are unchanged.

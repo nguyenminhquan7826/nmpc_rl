@@ -50,12 +50,23 @@ def plot_episode_weights(history, images_dir):
         ax.grid(alpha=.28)
         ax.legend(loc="best",ncol=3 if n==6 else 2,fontsize=8)
         results[key]=str(_save(fig,Path(images_dir)/f"{key}_episodes.png"))
-    fig,ax=plt.subplots(figsize=(10,5.2))
-    ax.plot(ep,df["mean_reward"],label="Mean paper reward / control step")
-    ax.plot(ep,df["rms_td"],label="RMS TD(0) error")
-    ax.set(xlabel="Completed TRAIN episodes",title="Learning diagnostics (TRAIN)")
-    ax.grid(alpha=.25)
-    ax.legend(loc="best")
+    fig,axes=plt.subplots(3,1,figsize=(10,10),sharex=True)
+    axes[0].plot(ep,df["mean_reward"],label="Mean paper reward / control step")
+    axes[0].set_ylabel("Mean reward")
+    if "mean_td" in df:
+        axes[1].plot(ep,df["mean_td"],color="tab:green",label="Mean signed TD(0) error")
+    else:
+        axes[1].text(.5,.5,"Mean TD unavailable in this older history; cannot infer from RMS",
+                     ha="center",va="center",transform=axes[1].transAxes,fontsize=9)
+    axes[1].axhline(0,color="black",linestyle="--",linewidth=1,label="Zero TD")
+    axes[1].set_ylabel("Mean signed TD")
+    axes[2].plot(ep,df["rms_td"],color="tab:orange",label="RMS TD(0) error")
+    axes[2].set(xlabel="Completed TRAIN episodes",ylabel="RMS TD")
+    fig.suptitle("Learning diagnostics (TRAIN)")
+    for ax in axes:
+        ax.grid(alpha=.25)
+        ax.legend(loc="best")
+    fig.tight_layout()
     results["learning"]=str(_save(fig,Path(images_dir)/"training_reward_td.png"))
     return results
 

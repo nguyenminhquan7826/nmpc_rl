@@ -16,6 +16,7 @@ import argparse
 import json
 from pathlib import Path
 from best_episode_selection import select_best_train_episode
+from td_diagnostics import episode_td_statistics
 import numpy as np
 import pandas as pd
 
@@ -346,7 +347,7 @@ def main(argv=None):
             "actor_mu_excess_sq_mean":float(df.actor_mu_excess_sq.mean()),
             "actor_mu_fraction_beyond_threshold":float(
                 df.actor_mu_beyond_threshold.mean()/8.),
-            "rms_td":float(np.sqrt(np.mean(df.td**2))),
+            **episode_td_statistics(df),
             "actor_grad_norm_max":float(df.actor_grad_norm.max()),
             "critic_step_norm_max":float(df.critic_param_step_norm.max()),
             "mean_cte_m":float(df.cte_m.mean()),
