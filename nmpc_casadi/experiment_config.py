@@ -57,6 +57,11 @@ WEIGHT_BOX_MARGIN = 0.40
 REWARD_CANDIDATE = "legacy"  # constant Qe/Re in audit_training_reward.py
 EVALUATE_SAME_TRAIN_TRACK = True
 
+# After frozen comparison, run a separate live-learning episode from the
+# best available saved checkpoint. Same rates/bounds as checkpoint metadata.
+RUN_ONLINE_ADAPTATION = True
+ONLINE_ADAPTATION_SEED = 0
+
 # Experiment D ONLY in TRAIN: frozen rollout still uses fixed paper Eq.(4).
 SOLVER_FAILURE_PENALTY = 10.0      # only after both solver attempts fail
 FAILURE_TERMINAL_PENALTY = 100.0  # additional at catastrophic termination
