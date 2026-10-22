@@ -16,8 +16,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v1"
-IMAGES_DIR = BASE_DIR / "images_v1"
+RESULTS_DIR = BASE_DIR / "results_residual_gradient"
+IMAGES_DIR = BASE_DIR / "images_residual_gradient"
 TRAIN_CSV = TRAJECTORY_DIR / "test_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
@@ -37,6 +37,7 @@ INITIAL_HEADING_DEG = 0.
 # The two TRAIN-only penalties are exploratory; no stability certificate.
 ACTOR_LR = 1e-5
 CRITIC_LR = 4
+CRITIC_UPDATE_MODE = "residual_gradient"  # "semi_gradient" restores baseline
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].

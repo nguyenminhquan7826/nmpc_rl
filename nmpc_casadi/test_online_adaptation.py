@@ -23,7 +23,7 @@ class OnlineTests(unittest.TestCase):
             with np.load(ckpt,allow_pickle=False) as z:
                 arrays={k:z[k].copy() for k in z.files}
             meta=json.loads(str(arrays["metadata"].item()))
-            meta.update(actor_lr=1e-5,critic_lr=1.,
+            meta.update(actor_lr=1e-5,critic_lr=1.,critic_update_mode="residual_gradient",
                         actor_output_lr_factors=[1.]*8,critic_p_lr_factors=[1.]*6)
             arrays["metadata"]=np.array(json.dumps(meta));np.savez_compressed(ckpt,**arrays)
             original=ckpt.read_bytes()

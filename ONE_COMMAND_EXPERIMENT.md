@@ -276,3 +276,36 @@ signed mean TD with a zero reference, and RMS TD. No sign is inferred from
 RMS. Old histories lacking mean_td explicitly display it as unavailable.
 Use a new results/images directory when retraining to preserve prior outputs.
 Learning rates, bounds, rewards and update formulas are unchanged.
+
+## Experimental full gradient of sampled squared TD loss
+
+CRITIC_UPDATE_MODE = "residual_gradient" is enabled for the next comparison.
+Use "semi_gradient" to restore the previous method. The training CLI exposes
+--critic-update-mode with the same two choices; its default remains the old
+semi-gradient for backward compatibility. New default output directories are
+results_residual_gradient and images_residual_gradient. Do not reuse nonempty
+outputs. LRs, gamma, bounds, Actor update and reward are unchanged.
+
+For delta = r + gamma V_P(e_next) - V_P(e), V_P(e) = -sum(P_i e_i^2):
+- semi_gradient: g_i = delta * e_i^2
+- residual_gradient: g_i = delta * (e_i^2 - gamma * e_next_i^2)
+- true terminal: both use g_i = delta * e_i^2 (no bootstrap)
+- time-limit truncation: retain bootstrap in both methods.
+P_new = project(P_old - component_LR * g). Transition data are held fixed;
+there is no derivative through NMPC, the plant or the Actor. The Actor uses
+the same pre-update delta in either mode.
+
+This minimizes sampled squared TD loss, not an unbiased gradient of squared
+expected Bellman error in stochastic dynamics/policies (double-sampling
+issue). It is an experimental alternative, not a guarantee of better control
+or convergence to zero TD. Near-identical successive errors may make this
+gradient small; do not increase rates until actual gradients are inspected.
+
+Checkpoint/run_config metadata records critic_update_mode. Online adaptation
+inherits the checkpoint mode; old checkpoints with no field keep semi-gradient.
+Detailed episode logs add critic_gradient_0..5, the actual loss derivatives
+before LR/projection; history adds mean_critic_gradient_0..5. Existing
+mean_td_e2_i still means delta*e_i^2 and is not the residual-gradient update.
+Compare signed mean TD, RMS, actual gradients, P drift/bound hits and frozen
+tracking under the same initial seed and episode budget. Freeze parameters
+for scoring; online-adaptation results remain a separate learning rollout.
