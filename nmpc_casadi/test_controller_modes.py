@@ -42,7 +42,7 @@ class ModeTests(unittest.TestCase):
                     np.testing.assert_array_equal(actor.q,cfg["initial_Q"])
                     np.testing.assert_array_equal(actor.r,cfg["initial_R"])
                     np.testing.assert_array_equal(critic.p,cfg["initial_P"])
-                elif mode in ("actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
+                elif mode in ("frozen","actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
                     actor,critic=initialize_adaptation(actor,critic,cfg,low,high,"initial_heads")
                 before={k:v.copy() for k,v in actor.params.items()};p0=critic.p.copy()
                 env=TrainEnvironment(train_length_m=b.CAD_S_END,
@@ -57,6 +57,13 @@ class ModeTests(unittest.TestCase):
                 self.assertEqual(len(log),2)
                 self.assertTrue((log.loop_ms>=log.solve_ms).all())
                 traces[mode]=log
+                if mode=="frozen":
+                    for prefix,key in (("q","initial_Q"),("r","initial_R"),("p","initial_P")):
+                        values=log[[f"{prefix}_{i}" for i in range(len(cfg[key]))]].to_numpy()
+                        np.testing.assert_allclose(values,np.tile(cfg[key],(len(log),1)),atol=1e-10)
+                    # Same physical weights and deterministic actions as Fixed.
+                    np.testing.assert_allclose(log[["X_m","Y_m","reward"]],
+                        traces["fixed"][["X_m","Y_m","reward"]],rtol=1e-6,atol=1e-8)
                 if mode not in ("fixed","frozen"):
                     self.assertEqual(summary["actor_updates"],2 if mode in ("actor_adapt","full_adapt") else 0)
                     self.assertEqual(summary["critic_updates"],2 if mode in ("critic_adapt","full_adapt") else 0)

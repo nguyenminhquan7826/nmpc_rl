@@ -398,3 +398,19 @@ initialization, with initial_P. This evaluates online learning from scratch.
 Use --adapt-start trained to restore the earlier adaptation from the trained
 NN/P. All runs still use saved learning rates/bounds unless explicitly overridden
 by your load_checkpoint configuration. Use fresh output directories.
+
+## Frozen now starts at initial Q/R/Qf, like Fixed
+
+The five-mode evaluator now resets Frozen's Actor output heads and Critic P
+using initial_heads, retaining trained hidden layers but making deterministic
+Q/R equal initial_Q/initial_R at every state. P stays equal to initial_P.
+No parameters update in Frozen. It no longer represents the pretrained
+controller's original learned outputs. Its nominal dynamics/trajectory should
+match Fixed, apart from numerical precision; this is expected, not an error.
+
+This Frozen reset is independent of --adapt-start, which still controls the
+adaptation modes. To compare all modes from the same initial weights use
+--adapt-start initial_heads (default) or fresh, not trained. Optional
+frozen_sampled follows --adapt-start as before. Saved evaluation_config.json
+records frozen_definition to distinguish this from older results.
+Original run_experiment.py frozen training-checkpoint selection is unchanged.
