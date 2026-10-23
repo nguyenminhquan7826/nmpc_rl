@@ -16,8 +16,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v2"
-IMAGES_DIR = BASE_DIR / "images_v2"
+RESULTS_DIR = BASE_DIR / "results_v15"
+IMAGES_DIR = BASE_DIR / "images_v15"
 TRAIN_CSV = TRAJECTORY_DIR / "test_xref.csv"
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
@@ -28,7 +28,8 @@ TRAIN_CSV_SOURCE = None
 EPISODES = 500
 STEPS_PER_EPISODE = 1150
 CHECKPOINT_EPISODES = (1, 10, 25, 50, 100)
-GAMMA = 0.99
+GAMMA = 0.94
+# good gamma = 0.92
 SEED = 0
 INITIAL_EY_M = .05
 INITIAL_HEADING_DEG = 0.
@@ -36,8 +37,10 @@ INITIAL_HEADING_DEG = 0.
 # Experiment D: v3-matched 100 episodes, margin and optimizer rates.
 # The two TRAIN-only penalties are exploratory; no stability certificate.
 ACTOR_LR = 1e-5
-CRITIC_LR = 4
-CRITIC_UPDATE_MODE = "residual_gradient"  # "semi_gradient" restores baseline
+CRITIC_LR = 50
+# good critic_lr = 50
+CRITIC_UPDATE_MODE = "semi_gradient"  # "semi_gradient" restores baseline
+#"residual_gradient"
 
 # Per-component learning-rate multipliers (controlled ablation).
 # Actor order: Q[vx,vy,psi,r,X,Y], R[acceleration,steering].

@@ -69,7 +69,8 @@ def screening_box(margin_fraction: float):
     best = _validate(GOOD_NMPC)
     lo = tuple((1. - margin) * np.minimum(a, b) for a, b in zip(start, best))
     hi = tuple((1. + margin) * np.maximum(a, b) for a, b in zip(start, best))
-    hi[2][4:6] *= 1.50  # Nới riêng biên trên PX/PY thêm 10%
+    hi[2][:4] *= 10   # Nới Pvx, Pvy, Ppsi, Pr thêm 20%
+    hi[2][4:6] *= 3.50  # Giữ biên PX/PY bằng 3,5 lần biên cơ sở
     for a, b, low, high in zip(start, best, lo, hi):
         if np.any(low <= 0.) or np.any(a <= low) or np.any(a >= high):
             raise AssertionError("Initial weights not interior")
