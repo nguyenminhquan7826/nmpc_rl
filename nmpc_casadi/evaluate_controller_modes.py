@@ -36,6 +36,19 @@ def load_checkpoint(path, seed):
     high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
     _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
     actor.rng=np.random.default_rng(seed)
+    # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
+    config["actor_lr"] = 1e-5
+    config["critic_lr"] = 60.0
+
+    # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
+    config["actor_output_lr_factors"] = [
+        1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5
+    ]
+
+    # Thứ tự: Pvx, Pvy, Ppsi, Pr, PX, PY
+    config["critic_p_lr_factors"] = [
+        0.5, 0.5, 0.1, 0.2, 4.0, 4.0
+    ]
     return actor,critic,config,low,high
 
 
