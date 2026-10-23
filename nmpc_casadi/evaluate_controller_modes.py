@@ -38,7 +38,7 @@ def load_checkpoint(path, seed):
     actor.rng=np.random.default_rng(seed)
     # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
     config["actor_lr"] = 1e-5
-    config["critic_lr"] = 60.0
+    config["critic_lr"] = 2.0
 
     # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
     config["actor_output_lr_factors"] = [
