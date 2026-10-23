@@ -6,6 +6,7 @@ sampled latents. The direct-P Critic has six learned parameters, not a NN.
 from __future__ import annotations
 
 import argparse
+import time
 import json
 from pathlib import Path
 import numpy as np
@@ -18,12 +19,16 @@ from evaluate_frozen_actor_critic import load_frozen_agents, metrics_from_rows
 from train_actor_critic import write_checkpoint
 
 
-def adaptive_rollout(env, actor, critic, config):
+def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
+                     update_critic=True, sample_actions=True):
     """Apply old weights, observe transition, update both, then act again."""
     obs=env.reset()
     rows=[]
     for _ in range(env.max_steps):
-        proposal=actor.propose(obs.features,deterministic=False)
+        loop_start=time.perf_counter()
+        if update_actor and not sample_actions:
+            raise ValueError("Actor score-function learning requires sampled actions")
+        proposal=actor.propose(obs.features,deterministic=not sample_actions)
         p_before=critic.p.copy()
         nxt,reward,terminated,truncated,diag=env.step(
             proposal.q_diagonal,proposal.r_diagonal,critic,obs)
@@ -40,7 +45,8 @@ def adaptive_rollout(env, actor, critic, config):
             critic_component_scales=config.get("critic_p_lr_factors"),
             critic_update_mode=config.get("critic_update_mode","semi_gradient"),
             actor_mu_reg_coef=config.get("actor_mu_reg_coef",0.),
-            actor_mu_reg_threshold=config.get("actor_mu_reg_threshold",2.))
+            actor_mu_reg_threshold=config.get("actor_mu_reg_threshold",2.),
+            update_actor=update_actor,update_critic=update_critic)
         row={**diag,"controller":"online_adaptation",
              "t_s":len(rows)*b.Ts,"X_m":float(obs.physical[4]),
              "Y_m":float(obs.physical[5]),
@@ -60,14 +66,18 @@ def adaptive_rollout(env, actor, critic, config):
         rows.append(row)
         row.update({f"critic_gradient_{i}":float(v)
                     for i,v in enumerate(update.critic_gradient)})
+        row["loop_ms"]=1000*(time.perf_counter()-loop_start)
         obs=nxt
         if terminated or truncated:
             break
     log=pd.DataFrame(rows)
     summary=metrics_from_rows(log,config["gamma"],b.CAD_S_END)
-    summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log),
+    summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log) if update_actor or update_critic else 0,
+                   actor_updates=len(log) if update_actor else 0,
+                   critic_updates=len(log) if update_critic else 0,
                    critic_update_mode=config.get("critic_update_mode","semi_gradient"),
-                   action_mode="sampled_gaussian",reached_end=bool(log.reached_end.iloc[-1]),
+                   action_mode="sampled_gaussian" if sample_actions else "deterministic_mean",
+                   reached_end=bool(log.reached_end.iloc[-1]),
                    failure_terminal=bool(log.failure_terminal.iloc[-1]),
                    terminated=bool(log.terminated.iloc[-1]),
                    truncated=bool(log.truncated.iloc[-1]))

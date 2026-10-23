@@ -1,0 +1,30 @@
+{
+  "source": "reference_waypoints(1).csv",
+  "geometry": "natural cubic splines; numerical arc-length reparameterization",
+  "heading": "unwrap(atan2(dY/du,dX/du))",
+  "curvature": "(Xprime*Ysecond-Yprime*Xsecond)/(Xprime^2+Yprime^2)^1.5",
+  "speed_profile": "curvature cap followed by forward acceleration and backward braking passes",
+  "limits": {
+    "v_max_mps": 0.1,
+    "v_min_compatible_mps": 0.05,
+    "ay_max_mps2": 0.01,
+    "a_max_mps2": 0.05,
+    "braking_max_mps2": 0.05
+  },
+  "limit_provenance": "speed compatible with existing evaluator; acceleration limits are declared experimental generator settings, not measured vehicle limits",
+  "endpoint_stop": false,
+  "sampling_m": 0.025,
+  "points": 430,
+  "length_m": 10.703765230112591,
+  "duration_s": 111.615688149581,
+  "speed_min_mps": 0.06634396893021866,
+  "speed_max_mps": 0.1,
+  "max_abs_curvature_1pm": 2.2719412773881253,
+  "max_abs_geometric_steering_rad": 0.5191194727931475,
+  "longitudinal_accel_min_mps2": -0.050000000000000044,
+  "longitudinal_accel_max_mps2": 0.050000000000000044,
+  "checks": "finite, increasing arc/time, yaw=v*kappa, lateral cap, longitudinal bounds, geometric steering",
+  "full_vehicle_simulation_verified": false,
+  "sha256": "f9e41223df41b486c00e6793cad7e4ce1b55356dcca285cd82b648740315fc6c",
+  "repository_xref_validator": "PASS"
+}

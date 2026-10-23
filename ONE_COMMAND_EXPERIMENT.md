@@ -309,3 +309,46 @@ mean_td_e2_i still means delta*e_i^2 and is not the residual-gradient update.
 Compare signed mean TD, RMS, actual gradients, P drift/bound hits and frozen
 tracking under the same initial seed and episode budget. Freeze parameters
 for scoring; online-adaptation results remain a separate learning rollout.
+
+## Five-mode checkpoint evaluation on a supplied route
+
+No retraining is required. From nmpc_casadi:
+
+```powershell
+python evaluate_controller_modes.py --checkpoint results_v14/checkpoint_best_frozen.npz --reference reference_split/test_xref.csv --output evaluation_v14 --max-steps 2000 --seeds 0 1 2 --sampling-control
+```
+
+Replace paths with existing files. The supplied route uses the project's
+10-column XREF CSV format. It is validated and copied unchanged, with a
+separate prediction tail. A different SHA256 from TRAIN is recorded but does
+not itself prove a route is an independently designed held-out test.
+
+Modes: fixed (GOOD_NMPC baseline), frozen learned (deterministic mean),
+actor_adapt (sampled actions, only Actor parameters update), critic_adapt
+(deterministic Actor mean, only P updates), full_adapt (sampled actions,
+both update). Optional frozen_sampled uses sampling with neither model
+updating, to distinguish exploration effects from learning. These experiments
+use the existing nominal plant; model-parameter disturbances are not injected.
+
+Each mode and seed independently reloads the same checkpoint, keeps its
+saved bounds/gamma/LRs, and resets environment, warm-start and reference
+manager. Nothing is carried between modes. --ey and --heading-deg set shared
+initial offsets. Checkpoint source and route hashes are recorded. Adaptation
+modes learn on the route and must be reported separately from frozen scores;
+do not tune settings on a route you intend to call held-out final TEST.
+
+Outputs: comparison.csv (all runs), summary_by_mode.csv (mean/std, including
+failed runs), evaluation_config.json (reproduction settings), seed_N/
+mode_comparison.png (XY and CTE), and seed_N/MODE/trajectory.csv. Adaptation
+modes also save checkpoint_after.npz, preserving the original checkpoint.
+Report completion/failure and solver success before interpreting return and
+CTE: early failure can artificially improve total reward. Deterministic modes
+repeat identically across seeds without external noise; stochastic modes
+require multiple seeds. Existing post-capture metrics fall back to the whole
+log if a run never reaches the capture threshold; all-route CTE is separately
+reported. Full loop timing includes observation/plant/reference processing,
+Actor inference, solver, update diagnostics and online learning (not plot/file
+I/O); it is host timing, not embedded hardware timing. Disabled learner
+components evaluate gradients diagnostically without installing their updates.
+
+This runner does not replace run_experiment.py or its original frozen scoring.
