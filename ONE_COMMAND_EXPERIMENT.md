@@ -374,3 +374,27 @@ to the earlier CSV/settings/checkpoint outputs; without it no model or numeric
 files are written. Console still prints the run summaries. Use a new directory
 to avoid mixing old GOOD_NMPC fixed results with the new initial baseline.
 The older output listing above applies only when --save-data is supplied.
+
+## Start adaptation at the same nominal weights as Fixed
+
+Default --adapt-start initial_heads retains the trained Actor hidden layers,
+but resets W_mu/W_sigma to zero and b_mu/b_sigma to their original calibrated
+values. Thus deterministic Actor Q/R initially equal checkpoint initial_Q and
+initial_R for every observation. Critic P resets to initial_P. All adaptation
+modes and the optional frozen_sampled control use independent identical reset
+policies, not the trained controller. Frozen mode remains the original trained
+checkpoint and is labelled frozen as before. Fixed uses initial Q/R/P.
+
+Actor-only therefore holds initial_P fixed. Critic-only holds the reset Actor
+fixed (deterministic outputs equal initial Q/R). Full adapt updates both from
+the reset policy. This is relearning from a reset output policy with transferred
+features, not unchanged-checkpoint adaptation; report that distinction.
+Sampled actions need not equal the nominal initial Q/R on the first step:
+the latent Gaussian mean is calibrated to the initial weights, while sampling
+adds exploration. No changes are made to the checkpoint on disk.
+
+Use --adapt-start fresh to restore ALL Actor parameters to original seeded
+initialization, with initial_P. This evaluates online learning from scratch.
+Use --adapt-start trained to restore the earlier adaptation from the trained
+NN/P. All runs still use saved learning rates/bounds unless explicitly overridden
+by your load_checkpoint configuration. Use fresh output directories.
