@@ -64,10 +64,10 @@ def load_checkpoint(path, seed):
     high = (q_upper, r_upper, p_upper)
 
     # ===== Shared nominal initialization for all reset modes =====
-    config["initial_Q"] = [17, 4, 70, 3.1, 51.0, 51.0]
-    config["initial_R"] = [15, 200]
+    config["initial_Q"] = [12, 3, 100, 6, 53.75, 52.5]
+    config["initial_R"] = [15, 100]
     config["fixed_Qf"] = (
-        15.0 * np.asarray(config["initial_Q"], dtype=float)
+        2.0 * np.asarray(config["initial_Q"], dtype=float)
     ).tolist()
     config["initial_P"] = config["fixed_Qf"].copy()
 
@@ -100,8 +100,8 @@ def load_checkpoint(path, seed):
     actor.rng = np.random.default_rng(seed)
     config["evaluation_overrides_applied"] = True
 
-    config["actor_lr"] = 1e-5
-    config["critic_lr"] = 20000.0
+    config["actor_lr"] = 1e-6
+    config["critic_lr"] = 2e4
     config["actor_output_lr_factors"] = [1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5]
     config["critic_p_lr_factors"] = [0.5, 0.5, 0.1, 0.05, 4.0, 4.0]
     return actor, critic, config, low, high
