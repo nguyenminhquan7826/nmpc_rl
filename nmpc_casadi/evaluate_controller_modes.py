@@ -6,6 +6,7 @@ Frozen resets the trained Actor heads and P to initial Q/R/P, then locks them.
 """
 import argparse
 import json
+from logging import config
 import os
 import tempfile
 from pathlib import Path
@@ -25,33 +26,135 @@ from run_experiment import FixedWeightActor
 MODES=("fixed","frozen","actor_adapt","critic_adapt","full_adapt")
 
 
-def initial_fixed_policy(config,low,high):
-    q,r,p=(np.array(config[key],float) for key in ("initial_Q","initial_R","initial_P"))
-    return FixedWeightActor(q,r),SixParameterTDCritic(p,low[2],high[2])
+def initial_fixed_policy(config, low, high):
+    q = np.asarray(config["initial_Q"], dtype=float)
+    r = np.asarray(config["initial_R"], dtype=float)
 
+    # Fixed luôn lấy Qf riêng, không lấy P của Critic đang học.
+    qf = np.asarray(
+        config.get("fixed_Qf", config["initial_P"]),
+        dtype=float,
+    )
+
+    actor = FixedWeightActor(q, r)
+
+    # Đây chỉ là đối tượng cung cấp terminal matrix cho solver.
+    # Mode Fixed không gọi cập nhật TD.
+    terminal = SixParameterTDCritic(
+        qf, low[2], high[2]
+    )
+
+    return actor, terminal
 
 def load_checkpoint(path, seed):
-    with np.load(path,allow_pickle=False) as z:
-        config=json.loads(str(z["metadata"].item()))
-    low=tuple(np.array(config[f"{k}_lower"],float) for k in ("Q","R","P"))
-    high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
-    _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
-    actor.rng=np.random.default_rng(seed)
-    # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
-    config["actor_lr"] = 1e-5
-    config["critic_lr"] = 2.0
+    with np.load(path, allow_pickle=False) as z:
+        config = json.loads(str(z["metadata"].item()))
 
-    # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
+    # Tải và kiểm tra checkpoint theo cấu hình gốc.
+    low = tuple(
+        np.array(config[f"{k}_lower"], dtype=float)
+        for k in ("Q", "R", "P")
+    )
+    high = tuple(
+        np.array(config[f"{k}_upper"], dtype=float)
+        for k in ("Q", "R", "P")
+    )
+
+    _, (actor, critic), _ = load_frozen_agents(
+        path, low, high,
+        expected_gamma=config["gamma"],
+    )
+
+    # Giữ lại thông tin training gốc để đối chiếu.
+    config["source_initial_weights"] = {
+        k: list(config[f"initial_{k}"])
+        for k in ("Q", "R", "P")
+    }
+    config["source_weight_bounds"] = {
+        f"{k}_{side}": list(config[f"{k}_{side}"])
+        for k in ("Q", "R", "P")
+        for side in ("lower", "upper")
+    }
+
+    # ===== Bộ khởi tạo chung cho Fixed và các mode reset =====
+    config["initial_Q"] = [12, 3, 15, 6, 183.75, 192.5]
+    config["initial_R"] = [15, 400]
+
+    # Terminal cost riêng của Fixed NMPC
+    config["fixed_Qf"] = (
+        15.0 * np.asarray(config["initial_Q"], dtype=float)
+    ).tolist()
+
+    # Critic bắt đầu cùng giá trị, nhưng được cập nhật độc lập
+    config["initial_P"] = config["fixed_Qf"].copy()
+
+    # ===== Miền trọng số dùng riêng cho eval =====
+    q_upper = np.array(
+        [100, 45, 225, 90, 300, 300], dtype=float
+    )
+    r_upper = np.array([20, 500], dtype=float)
+
+    # Nới trần Pvx, Pvy, Ppsi thành 2,5 lần trần checkpoint.
+    p_upper = high[2].copy()
+    p_upper[:3] *= 2.5
+
+    high = (q_upper, r_upper, p_upper)
+
+    # Kiểm tra bộ khởi tạo.
+    for k, lower, upper in zip(("Q", "R", "P"), low, high):
+        initial = np.asarray(config[f"initial_{k}"], dtype=float)
+
+        if (
+            initial.shape != lower.shape
+            or upper.shape != lower.shape
+            or not np.isfinite(initial).all()
+            or not np.isfinite(lower).all()
+            or not np.isfinite(upper).all()
+            or np.any(lower <= 0)
+            or np.any(lower >= upper)
+        ):
+            raise ValueError(f"Invalid eval initial weights/bounds: {k}")
+
+        # Q/R phải nằm nghiêm ngặt trong biên để ánh xạ ngược tanh.
+        if k in ("Q", "R"):
+            valid = (initial > lower) & (initial < upper)
+        else:
+            valid = (initial >= lower) & (initial <= upper)
+
+        if not np.all(valid):
+            raise ValueError(
+                f"Eval initial_{k} outside bounds.\n"
+                f"initial={initial}\n"
+                f"lower={lower}\n"
+                f"upper={upper}"
+            )
+
+        config[f"{k}_lower"] = lower.tolist()
+        config[f"{k}_upper"] = upper.tolist()
+
+    # Đồng bộ miền thực tế của model.
+    actor.lower = np.r_[low[0], low[1]].copy()
+    actor.upper = np.r_[high[0], high[1]].copy()
+    critic.lower = low[2].copy()
+    critic.upper = high[2].copy()
+
+    actor.rng = np.random.default_rng(seed)
+
+    # ===== Learning rates dùng riêng cho eval =====
+    config["actor_lr"] = 1e-6
+    config["critic_lr"] = 20000.0
+
+    # Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
     config["actor_output_lr_factors"] = [
         1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5
     ]
 
-    # Thứ tự: Pvx, Pvy, Ppsi, Pr, PX, PY
+    # Pvx, Pvy, Ppsi, Pr, PX, PY
     config["critic_p_lr_factors"] = [
-        0.5, 0.5, 0.1, 0.2, 4.0, 4.0
+        0.5, 0.5, 0.1, 0.05, 4.0, 4.0
     ]
-    return actor,critic,config,low,high
 
+    return actor, critic, config, low, high
 
 def initialize_adaptation(actor,critic,config,low,high,start):
     """Reset nominal policy outputs/P without changing input checkpoint."""
