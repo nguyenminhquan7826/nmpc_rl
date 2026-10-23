@@ -42,6 +42,7 @@ def learn_one_transition(
     actor_output_scales=None, critic_component_scales=None,
     actor_mu_reg_coef=0.0, actor_mu_reg_threshold=2.0,
     critic_update_mode="semi_gradient",
+    update_actor=True, update_critic=True,
 ):
     if not isinstance(actor, GaussianWeightActor) or not isinstance(
         critic, SixParameterTDCritic
@@ -88,20 +89,25 @@ def learn_one_transition(
     }
     if any(not np.all(np.isfinite(x)) for x in candidates.values()):
         raise FloatingPointError("Actor candidate SGD weights nonfinite")
-    result=critic.td_step(
+    # A diagnostic copy evaluates TD/gradient when this component is frozen.
+    # Its candidate update is never installed in the live controller.
+    import copy
+    critic_target=critic if update_critic else copy.deepcopy(critic)
+    result=critic_target.td_step(
         error,next_error,reward,gamma,
         float(critic_lr)*critic_factors,
         terminated=bool(terminated),update_mode=critic_update_mode)
     if not np.isclose(result.td_error,delta,rtol=1e-12,atol=1e-12):
         raise RuntimeError("Actor and Critic TD mismatch")
-    for key,updated in candidates.items():
-        actor.params[key][...] = updated
+    if update_actor:
+        for key,updated in candidates.items():
+            actor.params[key][...] = updated
     ag=float(np.sqrt(sum(np.sum(g*g) for g in gradients.values())))
     return TrainingStep(
         td=delta,actor_loss=float(loss),critic_loss=float(result.loss),
-        actor_grad_norm=ag,actor_param_step_norm=float(actor_lr)*ag,
-        critic_param_step_norm=float(np.linalg.norm(
-            np.asarray(result.p_after)-np.asarray(result.p_before))),
+        actor_grad_norm=ag,actor_param_step_norm=float(actor_lr)*ag if update_actor else 0.,
+        critic_param_step_norm=(float(np.linalg.norm(
+            np.asarray(result.p_after)-np.asarray(result.p_before))) if update_critic else 0.),
         value_current=value_now,value_next=value_next,reward=float(reward),
         critic_gradient=result.gradient,
     )

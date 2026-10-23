@@ -123,6 +123,8 @@ def frozen_rollout(env,actor,critic,gamma,case_label):
     obs=env.reset()
     rows=[]
     for _ in range(env.max_steps):
+        import time
+        loop_start=time.perf_counter()
         initial_progress=float(obs.reference["projection"]["s"])
         cte=float(obs.reference["projection"]["distance"])
         heading=float(obs.error[2])
@@ -149,6 +151,7 @@ def frozen_rollout(env,actor,critic,gamma,case_label):
             for k,v in enumerate(values):
                 row[f"{name}_{k}"]=float(v)
         rows.append(row)
+        row["loop_ms"]=1000*(time.perf_counter()-loop_start)
         obs=next_obs
         if terminated or truncated:
             break
