@@ -2,7 +2,7 @@
 
 Adaptation modes learn on the supplied route and are not frozen test scores.
 The optional frozen_sampled control isolates sampling from parameter updates.
-Frozen resets the trained Actor heads and P to initial Q/R/P, then locks them.
+Non-Fixed modes reset Actor heads as selected, but start P from the trained checkpoint.
 """
 import argparse
 import json
@@ -69,7 +69,9 @@ def load_checkpoint(path, seed):
     config["fixed_Qf"] = (
         2.0 * np.asarray(config["initial_Q"], dtype=float)
     ).tolist()
-    config["initial_P"] = config["fixed_Qf"].copy()
+    # Preserve the learned coefficients, not metadata initial_P or fixed_Qf.
+    config["trained_P"] = critic.p.copy().tolist()
+    config["initial_P"] = config["trained_P"].copy()
 
     # Validate once, before any simulation or model reset.
     for key, lower, upper, size in zip(("Q", "R", "P"), low, high, (6, 2, 6)):
@@ -108,7 +110,7 @@ def load_checkpoint(path, seed):
 
 
 def initialize_adaptation(actor,critic,config,low,high,start):
-    """Reset nominal policy outputs/P without changing input checkpoint."""
+    """Reset Actor outputs as selected; initialize Critic with checkpoint-trained P."""
     if start=="trained":
         if config.get("evaluation_overrides_applied",False):
             raise ValueError("Custom eval bounds require initial_heads or fresh; trained would remap learned Actor outputs")
@@ -206,7 +208,7 @@ def main(argv=None):
     ap.add_argument("--sampling-control",action="store_true")
     ap.add_argument("--adapt-start",choices=("initial_heads","fresh","trained"),
                     default="initial_heads",
-                    help="Default: retain learned hidden layers, reset Q/R heads and P to fixed initial values")
+                    help="Default: retain learned hidden layers, reset Q/R heads, retain checkpoint-trained P")
     ap.add_argument("--save-data",action="store_true",help="Also save CSV, settings and adapted checkpoints; default is images only")
     args=ap.parse_args(argv)
     if args.adapt_start=="trained":
@@ -228,7 +230,8 @@ def main(argv=None):
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
         "fixed_definition":"initial_Q_R_and_separate_fixed_Qf",
-        "frozen_definition":"trained_hidden_layers_reset_heads_and_P_to_initial_no_updates",
+        "frozen_definition":"trained_hidden_layers_reset_Q_R_heads_trained_P_no_updates",
+        "nonfixed_P_definition":"checkpoint_trained_P; only critic_adapt/full_adapt update it",
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
         "checkpoint_config":config,

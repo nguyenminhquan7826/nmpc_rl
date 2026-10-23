@@ -375,60 +375,41 @@ files are written. Console still prints the run summaries. Use a new directory
 to avoid mixing old GOOD_NMPC fixed results with the new initial baseline.
 The older output listing above applies only when --save-data is supplied.
 
-## Start adaptation at the same nominal weights as Fixed
+## Evaluation starts: Fixed Qf versus trained Critic P
 
-Default --adapt-start initial_heads retains the trained Actor hidden layers,
-but resets W_mu/W_sigma to zero and b_mu/b_sigma to their original calibrated
-values. Thus deterministic Actor Q/R initially equal checkpoint initial_Q and
-initial_R for every observation. Critic P resets to initial_P. All adaptation
-modes and the optional frozen_sampled control use independent identical reset
-policies, not the trained controller. Frozen mode remains the original trained
-checkpoint and is labelled frozen as before. Fixed uses initial Q/R/P.
+Fixed uses initial_Q, initial_R and fixed_Qf (the user-defined Qf_init).
+All other modes start with the learned P stored in the input checkpoint,
+recorded as trained_P and copied to initial_P. The checkpoint metadata's
+training initial_P is not used as the learned P.
 
-Actor-only therefore holds initial_P fixed. Critic-only holds the reset Actor
-fixed (deterministic outputs equal initial Q/R). Full adapt updates both from
-the reset policy. This is relearning from a reset output policy with transferred
-features, not unchanged-checkpoint adaptation; report that distinction.
-Sampled actions need not equal the nominal initial Q/R on the first step:
-the latent Gaussian mean is calibrated to the initial weights, while sampling
-adds exploration. No changes are made to the checkpoint on disk.
+Frozen and Actor adapt hold this trained P constant. Critic adapt and Full
+adapt start at the same trained P and then update it online. The optional
+frozen_sampled control also holds the trained P constant.
 
-Use --adapt-start fresh to restore ALL Actor parameters to original seeded
-initialization, with initial_P. This evaluates online learning from scratch.
-Use --adapt-start trained to restore the earlier adaptation from the trained
-NN/P. All runs still use saved learning rates/bounds unless explicitly overridden
-by your load_checkpoint configuration. Use fresh output directories.
+Default --adapt-start initial_heads retains trained Actor hidden layers,
+resets Q/R output heads to initial_Q/initial_R, and resets exploration sigma.
+Frozen uses this same reset without learning. --adapt-start fresh resets
+all Actor parameters, but still uses trained P; it is not learning both agents
+from scratch. Custom evaluation bounds prohibit --adapt-start trained because
+changing the output mapping would change the learned Actor policy.
 
-## Frozen now starts at initial Q/R/Qf, like Fixed
-
-The five-mode evaluator now resets Frozen's Actor output heads and Critic P
-using initial_heads, retaining trained hidden layers but making deterministic
-Q/R equal initial_Q/initial_R at every state. P stays equal to initial_P.
-No parameters update in Frozen. It no longer represents the pretrained
-controller's original learned outputs. Its nominal dynamics/trajectory should
-match Fixed, apart from numerical precision; this is expected, not an error.
-
-This Frozen reset is independent of --adapt-start, which still controls the
-adaptation modes. To compare all modes from the same initial weights use
---adapt-start initial_heads (default) or fresh, not trained. Optional
-frozen_sampled follows --adapt-start as before. Saved evaluation_config.json
-records frozen_definition to distinguish this from older results.
-Original run_experiment.py frozen training-checkpoint selection is unchanged.
+Fixed and Frozen now differ in terminal weights, so their difference includes
+transfer of the learned Critic. Compare Actor adapt against Frozen and
+frozen_sampled to isolate Actor learning and exploration. Each mode/seed uses
+an independent copy; no changes are made to the input checkpoint.
 
 ## Separate fixed terminal Qf and adaptive Critic P
 
 In evaluate_controller_modes.load_checkpoint, fixed_Qf is now a separate
-JSON-compatible list equal to 15*initial_Q; initial_P is an independent copy
-of fixed_Qf so all reset modes start at the same terminal weights. If editing
+JSON-compatible list (currently 2*initial_Q); initial_P is an independent copy
+of the checkpoint-trained P, shared by all non-Fixed modes. If editing
 initial_Q for evaluation, put that override BEFORE the fixed_Qf assignment.
 Both vectors must fit the evaluation P bounds. LRs and Q/R are not changed
 by this separation.
 
 Fixed uses fixed_Qf and never updates it. Frozen reset and Actor-only hold
 initial_P constant; Critic-only and Full adapt update P and pass diag(P) as
-terminal Qf. Never add fixed_Qf to P. Editing initial_P after the copy changes
-only Critic initialization, not Fixed; doing so intentionally breaks equal
-terminal initialization. The implementation still uses the six-P container
+terminal Qf. Never add fixed_Qf to P. Editing fixed_Qf changes only Fixed; it does not reset the learned P. The implementation still uses the six-P container
 for Fixed to match the solver interface, but never calls its learning update.
 Both fields are saved in the evaluation settings when --save-data is enabled.
 The original training driver and its checkpoint initial metadata are unchanged.
@@ -439,9 +420,9 @@ above before reloading adapted checkpoints whose initials differ from training.
 
 load_checkpoint now declares Q/R/P lower and upper arrays exactly once after
 validating the original checkpoint. The selected R upper bound is [30,800],
-not the obsolete later override [20,300]. Nominal Q is [17,4,70,3.1,51,51],
-R is [15,200], fixed_Qf is 15*Q, and initial_P is its independent copy.
-Actor LR is 1e-5, Critic LR 20000, Pr LR factor .05 as requested. These are
+not the obsolete later override [20,300]. Nominal Q is [12,3,100,6,53.75,52.5],
+R is [15,100], fixed_Qf is 2*Q, and initial_P comes from learned checkpoint P.
+Actor LR is 1e-6, Critic LR 20000, Pr LR factor .05 as requested. These are
 experimental settings, not a certified range or recommended optimum.
 
 Validation precedes simulation, records list-valued settings, and synchronizes

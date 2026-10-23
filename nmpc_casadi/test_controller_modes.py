@@ -18,15 +18,19 @@ class ModeTests(unittest.TestCase):
             path=Path(tmp)/"source.npz";fresh_checkpoint(path)
             original=path.read_bytes()
             actor,critic,cfg,low,high=load_checkpoint(path,0)
-            self.assertEqual(cfg["initial_Q"],[17,4,70,3.1,51.,51.])
-            self.assertEqual(cfg["initial_R"],[15,200])
+            self.assertEqual(cfg["initial_Q"],[12,3,100,6,53.75,52.5])
+            self.assertEqual(cfg["initial_R"],[15,100])
             self.assertEqual(cfg["R_upper"],[30.,800.])
             self.assertEqual(cfg["critic_lr"],20000.)
             np.testing.assert_array_equal(actor.lower,np.r_[low[0],low[1]])
             np.testing.assert_array_equal(actor.upper,np.r_[high[0],high[1]])
             np.testing.assert_array_equal(critic.lower,low[2])
             np.testing.assert_array_equal(critic.upper,high[2])
-            np.testing.assert_allclose(cfg["fixed_Qf"],15*np.array(cfg["initial_Q"]))
+            np.testing.assert_allclose(cfg["fixed_Qf"],2*np.array(cfg["initial_Q"]))
+            np.testing.assert_array_equal(cfg["initial_P"],critic.p)
+            self.assertNotEqual(cfg["initial_P"],cfg["fixed_Qf"])
+            # Fixture learned P differs from its saved training initialization.
+            self.assertNotEqual(cfg["initial_P"],cfg["source_initial_weights"]["P"])
             json.dumps(cfg)
             self.assertEqual(path.read_bytes(),original)
             with self.assertRaisesRegex(ValueError,"initial_heads"):
@@ -78,13 +82,13 @@ class ModeTests(unittest.TestCase):
                     actor,critic=initial_fixed_policy(cfg,low,high)
                     np.testing.assert_array_equal(actor.q,cfg["initial_Q"])
                     np.testing.assert_array_equal(actor.r,cfg["initial_R"])
-                    np.testing.assert_array_equal(critic.p,cfg["initial_P"])
+                    np.testing.assert_array_equal(critic.p,cfg["fixed_Qf"])
                 elif mode in ("frozen","actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
                     actor,critic=initialize_adaptation(actor,critic,cfg,low,high,"initial_heads")
                 before={k:v.copy() for k,v in actor.params.items()};p0=critic.p.copy()
                 env=TrainEnvironment(train_length_m=b.CAD_S_END,
                     q_initial=np.array(cfg["initial_Q"]),r_initial=np.array(cfg["initial_R"]),
-                    p_initial=np.array(cfg["initial_P"]),
+                    p_initial=critic.p.copy(),
                     task_qe=np.array(cfg["Qe_fixed"]),task_re=np.array(cfg["Re_fixed"]),
                     max_steps=2,ey=.05,heading_deg=0.)
                 summary,log=run_mode(env,actor,critic,cfg,mode)
@@ -98,9 +102,9 @@ class ModeTests(unittest.TestCase):
                     for prefix,key in (("q","initial_Q"),("r","initial_R"),("p","initial_P")):
                         values=log[[f"{prefix}_{i}" for i in range(len(cfg[key]))]].to_numpy()
                         np.testing.assert_allclose(values,np.tile(cfg[key],(len(log),1)),atol=1e-10)
-                    # Same physical weights and deterministic actions as Fixed.
-                    np.testing.assert_allclose(log[["X_m","Y_m","reward"]],
-                        traces["fixed"][["X_m","Y_m","reward"]],rtol=1e-6,atol=1e-8)
+                    # Frozen retains learned terminal weights, unlike Fixed.
+                    self.assertFalse(np.array_equal(log.p_0.to_numpy(),
+                        traces["fixed"].p_0.to_numpy()))
                 if mode not in ("fixed","frozen"):
                     self.assertEqual(summary["actor_updates"],2 if mode in ("actor_adapt","full_adapt") else 0)
                     self.assertEqual(summary["critic_updates"],2 if mode in ("critic_adapt","full_adapt") else 0)
