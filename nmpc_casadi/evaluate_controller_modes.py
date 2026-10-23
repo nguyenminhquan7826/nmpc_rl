@@ -34,40 +34,86 @@ def initial_fixed_policy(config,low,high):
 
 
 def load_checkpoint(path, seed):
-    with np.load(path,allow_pickle=False) as z:
-        config=json.loads(str(z["metadata"].item()))
-    low=tuple(np.array(config[f"{k}_lower"],float) for k in ("Q","R","P"))
-    high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
-    _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
-    # Separate the fixed controller terminal weights from the Critic's seed.
-    # Place this after any custom initial_Q override in this function.
-    config["fixed_Qf"] = (15.0*np.asarray(config["initial_Q"],float)).tolist()
+    with np.load(path, allow_pickle=False) as z:
+        config = json.loads(str(z["metadata"].item()))
+
+    # Validate the original checkpoint BEFORE applying evaluation overrides.
+    low = tuple(np.asarray(config[f"{k}_lower"], dtype=float)
+                for k in ("Q", "R", "P"))
+    high = tuple(np.asarray(config[f"{k}_upper"], dtype=float)
+                 for k in ("Q", "R", "P"))
+    _, (actor, critic), _ = load_frozen_agents(
+        path, low, high, expected_gamma=config["gamma"])
+    config["source_initial_weights"] = {
+        k: list(config[f"initial_{k}"]) for k in ("Q", "R", "P")
+    }
+    config["source_weight_bounds"] = {
+        f"{k}_{side}": list(config[f"{k}_{side}"])
+        for k in ("Q", "R", "P") for side in ("lower", "upper")
+    }
+
+    # ===== Evaluation bounds: edit each array only here =====
+    # State order: vx, vy, psi, r, X, Y.
+    q_lower = np.array([1, 0.2, 1, 0.5, 10, 10], dtype=float)
+    q_upper = np.array([100, 50, 250, 100, 500, 500], dtype=float)
+    # Input order: acceleration, steering.
+    r_lower = np.array([0.05, 0.5], dtype=float)
+    r_upper = np.array([30, 800], dtype=float)
+    p_lower = np.array([10, 2, 20, 5, 100, 100], dtype=float)
+    p_upper = np.array([1000, 300, 2000, 500, 25000, 25000], dtype=float)
+    low = (q_lower, r_lower, p_lower)
+    high = (q_upper, r_upper, p_upper)
+
+    # ===== Shared nominal initialization for all reset modes =====
+    config["initial_Q"] = [17, 4, 70, 3.1, 51.0, 51.0]
+    config["initial_R"] = [15, 200]
+    config["fixed_Qf"] = (
+        15.0 * np.asarray(config["initial_Q"], dtype=float)
+    ).tolist()
     config["initial_P"] = config["fixed_Qf"].copy()
-    for name in ("fixed_Qf","initial_P"):
-        values=np.asarray(config[name],float)
-        if (values.shape!=(6,) or not np.isfinite(values).all()
-            or np.any(values<low[2]) or np.any(values>high[2])):
-            raise ValueError(f"Eval {name} must be a finite six-vector inside P bounds")
-    actor.rng=np.random.default_rng(seed)
-    # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
+
+    # Validate once, before any simulation or model reset.
+    for key, lower, upper, size in zip(("Q", "R", "P"), low, high, (6, 2, 6)):
+        initial = np.asarray(config[f"initial_{key}"], dtype=float)
+        if (initial.shape != (size,) or lower.shape != (size,)
+            or upper.shape != (size,) or not np.isfinite(initial).all()
+            or not np.isfinite(lower).all() or not np.isfinite(upper).all()
+            or np.any(lower <= 0) or np.any(lower >= upper)):
+            raise ValueError(f"Invalid eval weights/bounds: {key}")
+        valid = ((initial > lower) & (initial < upper) if key in ("Q", "R")
+                 else (initial >= lower) & (initial <= upper))
+        if not np.all(valid):
+            raise ValueError(
+                f"initial_{key} outside eval bounds: "
+                f"initial={initial}, lower={lower}, upper={upper}")
+        config[f"{key}_lower"] = lower.tolist()
+        config[f"{key}_upper"] = upper.tolist()
+    fixed_qf = np.asarray(config["fixed_Qf"], dtype=float)
+    if (fixed_qf.shape != (6,) or not np.isfinite(fixed_qf).all()
+        or np.any(fixed_qf < p_lower) or np.any(fixed_qf > p_upper)):
+        raise ValueError("fixed_Qf outside evaluation P bounds")
+
+    # Synchronize live bounds ONCE; output heads are reset by the selected mode.
+    actor.lower = np.r_[q_lower, r_lower].copy()
+    actor.upper = np.r_[q_upper, r_upper].copy()
+    critic.lower = p_lower.copy()
+    critic.upper = p_upper.copy()
+    actor.rng = np.random.default_rng(seed)
+    config["evaluation_overrides_applied"] = True
+
     config["actor_lr"] = 1e-5
-    config["critic_lr"] = 2.0
-
-    # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
-    config["actor_output_lr_factors"] = [
-        1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5
-    ]
-
-    # Thứ tự: Pvx, Pvy, Ppsi, Pr, PX, PY
-    config["critic_p_lr_factors"] = [
-        0.5, 0.5, 0.1, 0.2, 4.0, 4.0
-    ]
-    return actor,critic,config,low,high
+    config["critic_lr"] = 20000.0
+    config["actor_output_lr_factors"] = [1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5]
+    config["critic_p_lr_factors"] = [0.5, 0.5, 0.1, 0.05, 4.0, 4.0]
+    return actor, critic, config, low, high
 
 
 def initialize_adaptation(actor,critic,config,low,high,start):
     """Reset nominal policy outputs/P without changing input checkpoint."""
-    if start=="trained":return actor,critic
+    if start=="trained":
+        if config.get("evaluation_overrides_applied",False):
+            raise ValueError("Custom eval bounds require initial_heads or fresh; trained would remap learned Actor outputs")
+        return actor,critic
     if start not in ("initial_heads","fresh"):
         raise ValueError("Unknown adaptation start")
     from gaussian_weight_actor import GaussianWeightActor
@@ -164,6 +210,8 @@ def main(argv=None):
                     help="Default: retain learned hidden layers, reset Q/R heads and P to fixed initial values")
     ap.add_argument("--save-data",action="store_true",help="Also save CSV, settings and adapted checkpoints; default is images only")
     args=ap.parse_args(argv)
+    if args.adapt_start=="trained":
+        ap.error("Custom evaluation bounds require --adapt-start initial_heads or fresh")
     if args.max_steps<1 or len(set(args.seeds))!=len(args.seeds):ap.error("Invalid steps/seeds")
     if args.output.exists() and any(args.output.iterdir()):ap.error("Output must be empty")
     # Validate checkpoint before staging. Saved bounds, not editable config.
