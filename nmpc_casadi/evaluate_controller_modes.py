@@ -39,6 +39,23 @@ def load_checkpoint(path, seed):
     return actor,critic,config,low,high
 
 
+def initialize_adaptation(actor,critic,config,low,high,start):
+    """Reset nominal policy outputs/P without changing input checkpoint."""
+    if start=="trained":return actor,critic
+    if start not in ("initial_heads","fresh"):
+        raise ValueError("Unknown adaptation start")
+    from gaussian_weight_actor import GaussianWeightActor
+    initial=GaussianWeightActor(np.random.default_rng(int(config["seed"])),
+        nominal_q=np.array(config["initial_Q"]),nominal_r=np.array(config["initial_R"]),
+        q_lower=low[0],q_upper=high[0],r_lower=low[1],r_upper=high[1],
+        sigma_lower=config["sigma_lower"],sigma_initial=config["sigma_initial"],
+        sigma_upper=config["sigma_upper"])
+    keys=("W_mu","b_mu","W_sigma","b_sigma") if start=="initial_heads" else tuple(actor.params)
+    for key in keys:actor.params[key][...]=initial.params[key]
+    critic=SixParameterTDCritic(np.array(config["initial_P"]),low[2],high[2])
+    return actor,critic
+
+
 def run_mode(env, actor, critic, config, mode):
     if mode in ("fixed","frozen"):
         summary,log=frozen_rollout(env,actor,critic,config["gamma"],mode)
@@ -116,6 +133,9 @@ def main(argv=None):
     ap.add_argument("--ey",type=float,default=.05)
     ap.add_argument("--heading-deg",type=float,default=0.)
     ap.add_argument("--sampling-control",action="store_true")
+    ap.add_argument("--adapt-start",choices=("initial_heads","fresh","trained"),
+                    default="initial_heads",
+                    help="Default: retain learned hidden layers, reset Q/R heads and P to fixed initial values")
     ap.add_argument("--save-data",action="store_true",help="Also save CSV, settings and adapted checkpoints; default is images only")
     args=ap.parse_args(argv)
     if args.max_steps<1 or len(set(args.seeds))!=len(args.seeds):ap.error("Invalid steps/seeds")
@@ -148,6 +168,8 @@ def main(argv=None):
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
             if mode=="fixed":
                 actor,critic=initial_fixed_policy(config,low,high)
+            elif mode in ("actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
+                actor,critic=initialize_adaptation(actor,critic,config,low,high,args.adapt_start)
             env=TrainEnvironment(train_length_m=b.CAD_S_END,
                 q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
                 p_initial=np.array(config["initial_P"]),
@@ -161,6 +183,7 @@ def main(argv=None):
                 if mode in ("actor_adapt","critic_adapt","full_adapt"):
                     write_checkpoint(folder/"checkpoint_after.npz",actor,critic,
                         {**config,"adaptation_mode":mode,"adaptation_seed":seed,
+                         "adaptation_start":args.adapt_start,
                          "adaptation_reference_sha256":staged["reference_sha256"]})
             print(json.dumps(summary),flush=True)
             if args.save_data:pd.DataFrame(records).to_csv(args.output/"comparison.csv",index=False)
