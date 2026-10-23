@@ -12,6 +12,23 @@ from run_experiment import FixedWeightActor
 
 
 class ModeTests(unittest.TestCase):
+    def test_fixed_terminal_is_independent_of_critic_initial_P(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"source.npz";fresh_checkpoint(path)
+            actor,critic,cfg,low,high=load_checkpoint(path,12)
+            self.assertIsNot(cfg["fixed_Qf"],cfg["initial_P"])
+            fixed_qf=np.array(cfg["fixed_Qf"])
+            # Changing only Critic initialization must not change Fixed.
+            cfg["initial_P"]=(fixed_qf*.99).tolist()
+            fixed_actor,fixed_terminal=initial_fixed_policy(cfg,low,high)
+            _,adaptive_critic=initialize_adaptation(actor,critic,cfg,low,high,"initial_heads")
+            np.testing.assert_array_equal(fixed_terminal.p,fixed_qf)
+            np.testing.assert_allclose(adaptive_critic.p,fixed_qf*.99)
+            # Live TD updates cannot mutate Fixed terminal weights/config.
+            adaptive_critic.td_step(np.full(6,.05),np.full(6,.04),-1.,.9,.01)
+            np.testing.assert_array_equal(fixed_terminal.p,fixed_qf)
+            np.testing.assert_array_equal(cfg["fixed_Qf"],fixed_qf)
+
     def test_reset_heads_preserves_hidden_layers_and_matches_fixed_mean(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"source.npz";fresh_checkpoint(path)

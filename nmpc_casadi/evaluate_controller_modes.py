@@ -26,8 +26,11 @@ MODES=("fixed","frozen","actor_adapt","critic_adapt","full_adapt")
 
 
 def initial_fixed_policy(config,low,high):
-    q,r,p=(np.array(config[key],float) for key in ("initial_Q","initial_R","initial_P"))
-    return FixedWeightActor(q,r),SixParameterTDCritic(p,low[2],high[2])
+    q=np.asarray(config["initial_Q"],float)
+    r=np.asarray(config["initial_R"],float)
+    # Independent terminal configuration: never borrow the adapting P.
+    qf=np.asarray(config.get("fixed_Qf",config["initial_P"]),float)
+    return FixedWeightActor(q,r),SixParameterTDCritic(qf,low[2],high[2])
 
 
 def load_checkpoint(path, seed):
@@ -36,6 +39,15 @@ def load_checkpoint(path, seed):
     low=tuple(np.array(config[f"{k}_lower"],float) for k in ("Q","R","P"))
     high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
     _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
+    # Separate the fixed controller terminal weights from the Critic's seed.
+    # Place this after any custom initial_Q override in this function.
+    config["fixed_Qf"] = (15.0*np.asarray(config["initial_Q"],float)).tolist()
+    config["initial_P"] = config["fixed_Qf"].copy()
+    for name in ("fixed_Qf","initial_P"):
+        values=np.asarray(config[name],float)
+        if (values.shape!=(6,) or not np.isfinite(values).all()
+            or np.any(values<low[2]) or np.any(values>high[2])):
+            raise ValueError(f"Eval {name} must be a finite six-vector inside P bounds")
     actor.rng=np.random.default_rng(seed)
     # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
     config["actor_lr"] = 1e-5
@@ -168,7 +180,7 @@ def main(argv=None):
         "checkpoint_sha256":sha256_file(args.checkpoint),
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
-        "fixed_definition":"checkpoint_initial_Q_R_P",
+        "fixed_definition":"initial_Q_R_and_separate_fixed_Qf",
         "frozen_definition":"trained_hidden_layers_reset_heads_and_P_to_initial_no_updates",
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
@@ -187,9 +199,10 @@ def main(argv=None):
                 actor,critic=initialize_adaptation(actor,critic,config,low,high,"initial_heads")
             elif mode in ("actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
                 actor,critic=initialize_adaptation(actor,critic,config,low,high,args.adapt_start)
+            terminal_init=config["fixed_Qf"] if mode=="fixed" else config["initial_P"]
             env=TrainEnvironment(train_length_m=b.CAD_S_END,
                 q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
-                p_initial=np.array(config["initial_P"]),
+                p_initial=np.array(terminal_init),
                 task_qe=np.array(config["Qe_fixed"]),task_re=np.array(config["Re_fixed"]),
                 max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg)
             summary,log=run_mode(env,actor,critic,config,mode)
