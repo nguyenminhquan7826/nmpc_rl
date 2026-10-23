@@ -6,7 +6,6 @@ Frozen resets the trained Actor heads and P to initial Q/R/P, then locks them.
 """
 import argparse
 import json
-from logging import config
 import os
 import tempfile
 from pathlib import Path
@@ -33,7 +32,6 @@ def initial_fixed_policy(config,low,high):
     qf=np.asarray(config.get("fixed_Qf",config["initial_P"]),float)
     return FixedWeightActor(q,r),SixParameterTDCritic(qf,low[2],high[2])
 
-    return actor, terminal
 
 def load_checkpoint(path, seed):
     with np.load(path,allow_pickle=False) as z:
@@ -55,17 +53,17 @@ def load_checkpoint(path, seed):
     config["actor_lr"] = 1e-5
     config["critic_lr"] = 2.0
 
-    # Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
+    # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
     config["actor_output_lr_factors"] = [
         1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5
     ]
 
-    # Pvx, Pvy, Ppsi, Pr, PX, PY
+    # Thứ tự: Pvx, Pvy, Ppsi, Pr, PX, PY
     config["critic_p_lr_factors"] = [
-        0.5, 0.5, 0.1, 0.05, 4.0, 4.0
+        0.5, 0.5, 0.1, 0.2, 4.0, 4.0
     ]
+    return actor,critic,config,low,high
 
-    return actor, critic, config, low, high
 
 def initialize_adaptation(actor,critic,config,low,high,start):
     """Reset nominal policy outputs/P without changing input checkpoint."""
