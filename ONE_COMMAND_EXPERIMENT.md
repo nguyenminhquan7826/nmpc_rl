@@ -414,3 +414,23 @@ adaptation modes. To compare all modes from the same initial weights use
 frozen_sampled follows --adapt-start as before. Saved evaluation_config.json
 records frozen_definition to distinguish this from older results.
 Original run_experiment.py frozen training-checkpoint selection is unchanged.
+
+## Separate fixed terminal Qf and adaptive Critic P
+
+In evaluate_controller_modes.load_checkpoint, fixed_Qf is now a separate
+JSON-compatible list equal to 15*initial_Q; initial_P is an independent copy
+of fixed_Qf so all reset modes start at the same terminal weights. If editing
+initial_Q for evaluation, put that override BEFORE the fixed_Qf assignment.
+Both vectors must fit the evaluation P bounds. LRs and Q/R are not changed
+by this separation.
+
+Fixed uses fixed_Qf and never updates it. Frozen reset and Actor-only hold
+initial_P constant; Critic-only and Full adapt update P and pass diag(P) as
+terminal Qf. Never add fixed_Qf to P. Editing initial_P after the copy changes
+only Critic initialization, not Fixed; doing so intentionally breaks equal
+terminal initialization. The implementation still uses the six-P container
+for Fixed to match the solver interface, but never calls its learning update.
+Both fields are saved in the evaluation settings when --save-data is enabled.
+The original training driver and its checkpoint initial metadata are unchanged.
+Custom evaluation initial metadata still requires the loader support described
+above before reloading adapted checkpoints whose initials differ from training.

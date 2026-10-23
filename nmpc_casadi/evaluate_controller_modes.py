@@ -26,123 +26,34 @@ from run_experiment import FixedWeightActor
 MODES=("fixed","frozen","actor_adapt","critic_adapt","full_adapt")
 
 
-def initial_fixed_policy(config, low, high):
-    q = np.asarray(config["initial_Q"], dtype=float)
-    r = np.asarray(config["initial_R"], dtype=float)
-
-    # Fixed luôn lấy Qf riêng, không lấy P của Critic đang học.
-    qf = np.asarray(
-        config.get("fixed_Qf", config["initial_P"]),
-        dtype=float,
-    )
-
-    actor = FixedWeightActor(q, r)
-
-    # Đây chỉ là đối tượng cung cấp terminal matrix cho solver.
-    # Mode Fixed không gọi cập nhật TD.
-    terminal = SixParameterTDCritic(
-        qf, low[2], high[2]
-    )
+def initial_fixed_policy(config,low,high):
+    q=np.asarray(config["initial_Q"],float)
+    r=np.asarray(config["initial_R"],float)
+    # Independent terminal configuration: never borrow the adapting P.
+    qf=np.asarray(config.get("fixed_Qf",config["initial_P"]),float)
+    return FixedWeightActor(q,r),SixParameterTDCritic(qf,low[2],high[2])
 
     return actor, terminal
 
 def load_checkpoint(path, seed):
-    with np.load(path, allow_pickle=False) as z:
-        config = json.loads(str(z["metadata"].item()))
-
-    # Tải và kiểm tra checkpoint theo cấu hình gốc.
-    low = tuple(
-        np.array(config[f"{k}_lower"], dtype=float)
-        for k in ("Q", "R", "P")
-    )
-    high = tuple(
-        np.array(config[f"{k}_upper"], dtype=float)
-        for k in ("Q", "R", "P")
-    )
-
-    _, (actor, critic), _ = load_frozen_agents(
-        path, low, high,
-        expected_gamma=config["gamma"],
-    )
-
-    # Giữ lại thông tin training gốc để đối chiếu.
-    config["source_initial_weights"] = {
-        k: list(config[f"initial_{k}"])
-        for k in ("Q", "R", "P")
-    }
-    config["source_weight_bounds"] = {
-        f"{k}_{side}": list(config[f"{k}_{side}"])
-        for k in ("Q", "R", "P")
-        for side in ("lower", "upper")
-    }
-
-    # ===== Bộ khởi tạo chung cho Fixed và các mode reset =====
-    config["initial_Q"] = [12, 3, 15, 6, 183.75, 192.5]
-    config["initial_R"] = [15, 400]
-
-    # Terminal cost riêng của Fixed NMPC
-    config["fixed_Qf"] = (
-        15.0 * np.asarray(config["initial_Q"], dtype=float)
-    ).tolist()
-
-    # Critic bắt đầu cùng giá trị, nhưng được cập nhật độc lập
+    with np.load(path,allow_pickle=False) as z:
+        config=json.loads(str(z["metadata"].item()))
+    low=tuple(np.array(config[f"{k}_lower"],float) for k in ("Q","R","P"))
+    high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
+    _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
+    # Separate the fixed controller terminal weights from the Critic's seed.
+    # Place this after any custom initial_Q override in this function.
+    config["fixed_Qf"] = (15.0*np.asarray(config["initial_Q"],float)).tolist()
     config["initial_P"] = config["fixed_Qf"].copy()
-
-    # ===== Miền trọng số dùng riêng cho eval =====
-    q_upper = np.array(
-        [100, 45, 225, 90, 300, 300], dtype=float
-    )
-    r_upper = np.array([20, 500], dtype=float)
-
-    # Nới trần Pvx, Pvy, Ppsi thành 2,5 lần trần checkpoint.
-    p_upper = high[2].copy()
-    p_upper[:3] *= 2.5
-
-    high = (q_upper, r_upper, p_upper)
-
-    # Kiểm tra bộ khởi tạo.
-    for k, lower, upper in zip(("Q", "R", "P"), low, high):
-        initial = np.asarray(config[f"initial_{k}"], dtype=float)
-
-        if (
-            initial.shape != lower.shape
-            or upper.shape != lower.shape
-            or not np.isfinite(initial).all()
-            or not np.isfinite(lower).all()
-            or not np.isfinite(upper).all()
-            or np.any(lower <= 0)
-            or np.any(lower >= upper)
-        ):
-            raise ValueError(f"Invalid eval initial weights/bounds: {k}")
-
-        # Q/R phải nằm nghiêm ngặt trong biên để ánh xạ ngược tanh.
-        if k in ("Q", "R"):
-            valid = (initial > lower) & (initial < upper)
-        else:
-            valid = (initial >= lower) & (initial <= upper)
-
-        if not np.all(valid):
-            raise ValueError(
-                f"Eval initial_{k} outside bounds.\n"
-                f"initial={initial}\n"
-                f"lower={lower}\n"
-                f"upper={upper}"
-            )
-
-        config[f"{k}_lower"] = lower.tolist()
-        config[f"{k}_upper"] = upper.tolist()
-
-    # Đồng bộ miền thực tế của model.
-    actor.lower = np.r_[low[0], low[1]].copy()
-    actor.upper = np.r_[high[0], high[1]].copy()
-    critic.lower = low[2].copy()
-    critic.upper = high[2].copy()
-
-    actor.rng = np.random.default_rng(seed)
-
-    # ===== Learning rates dùng riêng cho eval =====
-    config["actor_lr"] = 1e-6
-    config["critic_lr"] = 20000.0
+    for name in ("fixed_Qf","initial_P"):
+        values=np.asarray(config[name],float)
+        if (values.shape!=(6,) or not np.isfinite(values).all()
+            or np.any(values<low[2]) or np.any(values>high[2])):
+            raise ValueError(f"Eval {name} must be a finite six-vector inside P bounds")
+    actor.rng=np.random.default_rng(seed)
+    # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
+    config["actor_lr"] = 1e-5
+    config["critic_lr"] = 2.0
 
     # Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
     config["actor_output_lr_factors"] = [
@@ -271,7 +182,7 @@ def main(argv=None):
         "checkpoint_sha256":sha256_file(args.checkpoint),
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
-        "fixed_definition":"checkpoint_initial_Q_R_P",
+        "fixed_definition":"initial_Q_R_and_separate_fixed_Qf",
         "frozen_definition":"trained_hidden_layers_reset_heads_and_P_to_initial_no_updates",
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
@@ -290,9 +201,10 @@ def main(argv=None):
                 actor,critic=initialize_adaptation(actor,critic,config,low,high,"initial_heads")
             elif mode in ("actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
                 actor,critic=initialize_adaptation(actor,critic,config,low,high,args.adapt_start)
+            terminal_init=config["fixed_Qf"] if mode=="fixed" else config["initial_P"]
             env=TrainEnvironment(train_length_m=b.CAD_S_END,
                 q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
-                p_initial=np.array(config["initial_P"]),
+                p_initial=np.array(terminal_init),
                 task_qe=np.array(config["Qe_fixed"]),task_re=np.array(config["Re_fixed"]),
                 max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg)
             summary,log=run_mode(env,actor,critic,config,mode)
