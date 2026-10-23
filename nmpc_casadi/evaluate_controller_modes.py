@@ -32,37 +32,120 @@ def initial_fixed_policy(config,low,high):
     qf=np.asarray(config.get("fixed_Qf",config["initial_P"]),float)
     return FixedWeightActor(q,r),SixParameterTDCritic(qf,low[2],high[2])
 
-
 def load_checkpoint(path, seed):
-    with np.load(path,allow_pickle=False) as z:
-        config=json.loads(str(z["metadata"].item()))
-    low=tuple(np.array(config[f"{k}_lower"],float) for k in ("Q","R","P"))
-    high=tuple(np.array(config[f"{k}_upper"],float) for k in ("Q","R","P"))
-    _,(actor,critic),_=load_frozen_agents(path,low,high,expected_gamma=config["gamma"])
-    # Separate the fixed controller terminal weights from the Critic's seed.
-    # Place this after any custom initial_Q override in this function.
-    config["fixed_Qf"] = (15.0*np.asarray(config["initial_Q"],float)).tolist()
-    config["initial_P"] = config["fixed_Qf"].copy()
-    for name in ("fixed_Qf","initial_P"):
-        values=np.asarray(config[name],float)
-        if (values.shape!=(6,) or not np.isfinite(values).all()
-            or np.any(values<low[2]) or np.any(values>high[2])):
-            raise ValueError(f"Eval {name} must be a finite six-vector inside P bounds")
-    actor.rng=np.random.default_rng(seed)
-    # LR dùng riêng cho các mode thích nghi trong lượt đánh giá
-    config["actor_lr"] = 1e-5
-    config["critic_lr"] = 2.0
+    with np.load(path, allow_pickle=False) as z:
+        config = json.loads(str(z["metadata"].item()))
 
-    # Thứ tự: Qvx, Qvy, Qpsi, Qr, QX, QY, Ra, Rdelta
+    low = tuple(
+        np.array(config[f"{k}_lower"], dtype=float)
+        for k in ("Q", "R", "P")
+    )
+    high = tuple(
+        np.array(config[f"{k}_upper"], dtype=float)
+        for k in ("Q", "R", "P")
+    )
+
+    # Kiểm tra checkpoint bằng biên training gốc trước.
+    _, (actor, critic), _ = load_frozen_agents(
+        path, low, high,
+        expected_gamma=config["gamma"],
+    )
+    # Miền thử nghiệm minh họa — chưa được kiểm chứng điều khiển.
+    # Q: vx, vy, psi, r, X, Y
+    q_lower = np.array([1, 0.2, 1, 0.5, 10, 10], dtype=float)
+    q_upper = np.array([100, 50, 250, 100, 500, 500], dtype=float)
+
+    # R: gia tốc, góc lái
+    r_lower = np.array([0.05, 0.5], dtype=float)
+    r_upper = np.array([30, 800], dtype=float)
+
+    # P/Qf: vx, vy, psi, r, X, Y
+    p_lower = np.array([10, 2, 20, 5, 100, 100], dtype=float)
+    p_upper = np.array([1000, 300, 2000, 500, 25000, 25000],
+                    dtype=float)
+
+    low = (q_lower, r_lower, p_lower)
+    high = (q_upper, r_upper, p_upper)
+
+    # Đồng bộ metadata.
+    for key, lower, upper in zip(("Q", "R", "P"), low, high):
+        if (
+            not np.isfinite(lower).all()
+            or not np.isfinite(upper).all()
+            or np.any(lower <= 0)
+            or np.any(lower >= upper)
+        ):
+            raise ValueError(f"Invalid eval bounds: {key}")
+
+        config[f"{key}_lower"] = lower.tolist()
+        config[f"{key}_upper"] = upper.tolist()
+
+    # Đồng bộ miền thực tế của model.
+    actor.lower = np.r_[q_lower, r_lower].copy()
+    actor.upper = np.r_[q_upper, r_upper].copy()
+    critic.lower = p_lower.copy()
+    critic.upper = p_upper.copy()
+    # Bộ khởi tạo chung cho các mode reset.
+    config["initial_Q"] = [17, 4, 70, 3.1, 51.0, 51.0]
+    config["initial_R"] = [15, 200]
+
+    config["fixed_Qf"] = (
+        15.0 * np.asarray(config["initial_Q"], dtype=float)
+    ).tolist()
+    config["initial_P"] = config["fixed_Qf"].copy()
+
+    # Miền R mới: initial phải nằm nghiêm ngặt trong biên.
+    r_upper = np.array([20.0, 300.0])
+    high = (high[0], r_upper, high[2])
+
+    # Kiểm tra và lưu biên eval.
+    for key, lower, upper in zip(("Q", "R", "P"), low, high):
+        initial = np.asarray(config[f"initial_{key}"], dtype=float)
+
+        if (
+            initial.shape != lower.shape
+            or upper.shape != lower.shape
+            or not np.isfinite(initial).all()
+            or not np.isfinite(lower).all()
+            or not np.isfinite(upper).all()
+            or np.any(lower <= 0)
+            or np.any(lower >= upper)
+        ):
+            raise ValueError(f"Invalid eval weights/bounds: {key}")
+
+        valid = (
+            (initial > lower) & (initial < upper)
+            if key in ("Q", "R")
+            else (initial >= lower) & (initial <= upper)
+        )
+
+        if not np.all(valid):
+            raise ValueError(
+                f"initial_{key} outside eval bounds:\n"
+                f"initial={initial}\nlower={lower}\nupper={upper}"
+            )
+
+        config[f"{key}_lower"] = lower.tolist()
+        config[f"{key}_upper"] = upper.tolist()
+
+    # Đồng bộ cả miền thực tế của Actor/Critic.
+    actor.lower = np.r_[low[0], low[1]].copy()
+    actor.upper = np.r_[high[0], high[1]].copy()
+    critic.lower = low[2].copy()
+    critic.upper = high[2].copy()
+    actor.rng = np.random.default_rng(seed)
+
+    config["actor_lr"] = 1e-5
+    config["critic_lr"] = 20000.0
+
     config["actor_output_lr_factors"] = [
         1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5
     ]
-
-    # Thứ tự: Pvx, Pvy, Ppsi, Pr, PX, PY
     config["critic_p_lr_factors"] = [
-        0.5, 0.5, 0.1, 0.2, 4.0, 4.0
+        0.5, 0.5, 0.1, 0.05, 4.0, 4.0
     ]
-    return actor,critic,config,low,high
+
+    return actor, critic, config, low, high
 
 
 def initialize_adaptation(actor,critic,config,low,high,start):
