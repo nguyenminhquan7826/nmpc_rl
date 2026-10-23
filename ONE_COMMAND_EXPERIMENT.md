@@ -323,7 +323,7 @@ Replace paths with existing files. The supplied route uses the project's
 separate prediction tail. A different SHA256 from TRAIN is recorded but does
 not itself prove a route is an independently designed held-out test.
 
-Modes: fixed (GOOD_NMPC baseline), frozen learned (deterministic mean),
+Modes: fixed (initial Q/R/P from checkpoint metadata), frozen learned (deterministic mean),
 actor_adapt (sampled actions, only Actor parameters update), critic_adapt
 (deterministic Actor mean, only P updates), full_adapt (sampled actions,
 both update). Optional frozen_sampled uses sampling with neither model
@@ -352,3 +352,25 @@ I/O); it is host timing, not embedded hardware timing. Disabled learner
 components evaluate gradients diagnostically without installing their updates.
 
 This runner does not replace run_experiment.py or its original frozen scoring.
+
+
+## Simplified evaluation figures and initial fixed baseline
+
+Fixed now uses checkpoint initial_Q, initial_R and initial_P, never GOOD_NMPC.
+Default evaluation output contains only three PNGs per seed: trajectories.png
+(all requested modes), cte_mean_max.png (absolute CTE over all logged steps,
+including initial transient), full_adapt_weights.png (applied Q/R/Qf).
+Incomplete runs are marked on comparison figures. Full-adapt weights use
+pre-update P applied to each NMPC step, not post-update diagnostics.
+
+Run five modes with images only, from nmpc_casadi:
+
+```powershell
+python evaluate_controller_modes.py --checkpoint results_v11_best/checkpoint_best_frozen.npz --reference test_reference/test_xref.csv --output evaluation_v11_initial_fixed --max-steps 2500 --seeds 0
+```
+
+Optional --sampling-control adds the frozen sampled mode. --save-data opts in
+to the earlier CSV/settings/checkpoint outputs; without it no model or numeric
+files are written. Console still prints the run summaries. Use a new directory
+to avoid mixing old GOOD_NMPC fixed results with the new initial baseline.
+The older output listing above applies only when --save-data is supplied.

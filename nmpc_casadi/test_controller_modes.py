@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import baseline as b
 from test_frozen_actor_critic_eval import fresh_checkpoint
-from evaluate_controller_modes import load_checkpoint,run_mode,MODES,plot_comparison
+from evaluate_controller_modes import load_checkpoint,run_mode,MODES,plot_comparison,initial_fixed_policy
 from train_rl_environment import TrainEnvironment
 from training_initialization import GOOD_NMPC
 from direct_p_critic import SixParameterTDCritic
@@ -20,9 +20,10 @@ class ModeTests(unittest.TestCase):
                 actor,critic,cfg,low,high=load_checkpoint(path,23)
                 cfg.update(actor_lr=1e-5,critic_lr=1.)
                 if mode=="fixed":
-                    q,r,p=GOOD_NMPC.arrays()
-                    actor=FixedWeightActor(q,r)
-                    critic=SixParameterTDCritic(p,low[2],high[2])
+                    actor,critic=initial_fixed_policy(cfg,low,high)
+                    np.testing.assert_array_equal(actor.q,cfg["initial_Q"])
+                    np.testing.assert_array_equal(actor.r,cfg["initial_R"])
+                    np.testing.assert_array_equal(critic.p,cfg["initial_P"])
                 before={k:v.copy() for k,v in actor.params.items()};p0=critic.p.copy()
                 env=TrainEnvironment(train_length_m=b.CAD_S_END,
                     q_initial=np.array(cfg["initial_Q"]),r_initial=np.array(cfg["initial_R"]),
@@ -40,7 +41,8 @@ class ModeTests(unittest.TestCase):
                     self.assertEqual(summary["actor_updates"],2 if mode in ("actor_adapt","full_adapt") else 0)
                     self.assertEqual(summary["critic_updates"],2 if mode in ("critic_adapt","full_adapt") else 0)
             plot_comparison(traces,root)
-            self.assertTrue((root/"mode_comparison.png").is_file())
+            self.assertEqual({p.name for p in root.glob('*.png')},
+                {"trajectories.png","cte_mean_max.png","full_adapt_weights.png"})
 
 
 if __name__=="__main__":unittest.main()

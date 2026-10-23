@@ -6,6 +6,7 @@ The optional frozen_sampled control isolates sampling from parameter updates.
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -17,10 +18,15 @@ from evaluate_frozen_actor_critic import frozen_rollout, load_frozen_agents
 from online_adaptation import adaptive_rollout
 from train_actor_critic import write_checkpoint
 from train_rl_environment import TrainEnvironment
-from training_initialization import GOOD_NMPC, TRAIN_REFERENCE_SHA256
+from training_initialization import TRAIN_REFERENCE_SHA256
 from run_experiment import FixedWeightActor
 
 MODES=("fixed","frozen","actor_adapt","critic_adapt","full_adapt")
+
+
+def initial_fixed_policy(config,low,high):
+    q,r,p=(np.array(config[key],float) for key in ("initial_Q","initial_R","initial_P"))
+    return FixedWeightActor(q,r),SixParameterTDCritic(p,low[2],high[2])
 
 
 def load_checkpoint(path, seed):
@@ -62,18 +68,42 @@ def plot_comparison(traces,output):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig,axes=plt.subplots(1,2,figsize=(14,6))
+    output=Path(output);output.mkdir(parents=True,exist_ok=True)
+    fig,ax=plt.subplots(figsize=(9,8))
     first=next(iter(traces.values()))
-    axes[0].plot(first.X_ref_m,first.Y_ref_m,"k--",label="Reference (logged)")
+    ax.plot(first.X_ref_m,first.Y_ref_m,"k--",label="Reference (logged)")
     for mode,log in traces.items():
         x=np.r_[log.X_m,log.X_next_m.iloc[-1]]
         y=np.r_[log.Y_m,log.Y_next_m.iloc[-1]]
-        axes[0].plot(x,y,label=mode,alpha=.85)
-        axes[1].plot(log.s_progress_m,100*log.cross_track_m,label=mode,alpha=.85)
-    axes[0].set(xlabel="X (m)",ylabel="Y (m)");axes[0].axis("equal")
-    axes[1].set(xlabel="Path progress (m)",ylabel="CTE (cm)")
-    for ax in axes:ax.grid(alpha=.25);ax.legend(fontsize=8)
-    fig.tight_layout();fig.savefig(Path(output)/"mode_comparison.png",dpi=180);plt.close(fig)
+        complete=bool(log.reached_end.iloc[-1])
+        ax.plot(x,y,label=mode+("" if complete else " [incomplete]"),alpha=.85)
+    ax.set(xlabel="X (m)",ylabel="Y (m)",title="Controller trajectories (fixed = initial Q/R/Qf)")
+    ax.axis("equal");ax.grid(alpha=.25);ax.legend(fontsize=8)
+    fig.tight_layout();fig.savefig(output/"trajectories.png",dpi=180);plt.close(fig)
+    modes=list(traces);positions=np.arange(len(modes))
+    means=[100*traces[m].cross_track_m.abs().mean() for m in modes]
+    maxima=[100*traces[m].cross_track_m.abs().max() for m in modes]
+    labels=[m+("" if bool(traces[m].reached_end.iloc[-1]) else "\n[incomplete]") for m in modes]
+    fig,ax=plt.subplots(figsize=(11,5))
+    for offset,values,label in ((-.2,means,"Mean |CTE|"),(.2,maxima,"Max |CTE|")):
+        bars=ax.bar(positions+offset,values,.4,label=label)
+        ax.bar_label(bars,fmt="%.2f",padding=3,fontsize=8)
+    ax.set_xticks(positions,labels,rotation=15)
+    ax.set(ylabel="CTE (cm)",title="CTE over the complete logged rollout, including initial transient")
+    ax.legend();ax.grid(axis="y",alpha=.25)
+    fig.tight_layout();fig.savefig(output/"cte_mean_max.png",dpi=180);plt.close(fig)
+    if "full_adapt" in traces:
+        log=traces["full_adapt"]
+        fig,axes=plt.subplots(3,1,figsize=(11,11),sharex=True)
+        for ax,prefix,names in ((axes[0],"q",("vx","vy","psi","r","X","Y")),
+            (axes[1],"r",("acceleration","steering")),
+            (axes[2],"p",("vx","vy","psi","r","X","Y"))):
+            for i,name in enumerate(names):ax.plot(log.s_progress_m,log[f"{prefix}_{i}"],label=name)
+            ax.set_ylabel({"q":"Q diagonal","r":"R diagonal","p":"Qf applied"}[prefix])
+            ax.legend(ncol=3,fontsize=8);ax.grid(alpha=.25)
+        axes[-1].set_xlabel("Path progress (m)")
+        fig.suptitle("Full adapt: applied Q, R and Qf during online learning")
+        fig.tight_layout();fig.savefig(output/"full_adapt_weights.png",dpi=180);plt.close(fig)
 
 
 def main(argv=None):
@@ -86,13 +116,15 @@ def main(argv=None):
     ap.add_argument("--ey",type=float,default=.05)
     ap.add_argument("--heading-deg",type=float,default=0.)
     ap.add_argument("--sampling-control",action="store_true")
+    ap.add_argument("--save-data",action="store_true",help="Also save CSV, settings and adapted checkpoints; default is images only")
     args=ap.parse_args(argv)
     if args.max_steps<1 or len(set(args.seeds))!=len(args.seeds):ap.error("Invalid steps/seeds")
     if args.output.exists() and any(args.output.iterdir()):ap.error("Output must be empty")
     # Validate checkpoint before staging. Saved bounds, not editable config.
     _,_,config,_,_=load_checkpoint(args.checkpoint,args.seeds[0])
     args.output.mkdir(parents=True,exist_ok=True)
-    details,staged=prepare_cad_evaluation_reference(args.reference,args.output/"reference",b.TAIL_LENGTH_M,
+    staging=tempfile.TemporaryDirectory(prefix="nmpc-evaluation-")
+    details,staged=prepare_cad_evaluation_reference(args.reference,Path(staging.name),b.TAIL_LENGTH_M,
         min_speed_mps=float(b.cfg["vx_min"]),
         max_speed_mps=min(float(b.TEST_SPEED_MPS),float(b.cfg["vx_max"])),
         wheelbase_m=float(b.WHEELBASE_M),
@@ -102,19 +134,20 @@ def main(argv=None):
         "checkpoint_sha256":sha256_file(args.checkpoint),
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
+        "fixed_definition":"checkpoint_initial_Q_R_P",
+        "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
         "checkpoint_config":config,
         "interpretation":"Adaptation learns on this route; do not use it to tune held-out test settings."}
-    (args.output/"evaluation_config.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
+    if args.save_data:
+        (args.output/"evaluation_config.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
     records=[]
     for seed in args.seeds:
         traces={}
         for mode in MODES+(("frozen_sampled",) if args.sampling_control else ()):
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
             if mode=="fixed":
-                q,r,p=GOOD_NMPC.arrays()
-                actor=FixedWeightActor(q,r)
-                critic=SixParameterTDCritic(p,low[2],high[2])
+                actor,critic=initial_fixed_policy(config,low,high)
             env=TrainEnvironment(train_length_m=b.CAD_S_END,
                 q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
                 p_initial=np.array(config["initial_P"]),
@@ -122,19 +155,22 @@ def main(argv=None):
                 max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg)
             summary,log=run_mode(env,actor,critic,config,mode)
             summary["seed"]=seed;records.append(summary);traces[mode]=log
-            folder=args.output/f"seed_{seed}"/mode;folder.mkdir(parents=True)
-            log.to_csv(folder/"trajectory.csv",index=False)
-            if mode in ("actor_adapt","critic_adapt","full_adapt"):
-                write_checkpoint(folder/"checkpoint_after.npz",actor,critic,
-                    {**config,"adaptation_mode":mode,"adaptation_seed":seed,
-                     "adaptation_reference_sha256":staged["reference_sha256"]})
+            if args.save_data:
+                folder=args.output/f"seed_{seed}"/mode;folder.mkdir(parents=True)
+                log.to_csv(folder/"trajectory.csv",index=False)
+                if mode in ("actor_adapt","critic_adapt","full_adapt"):
+                    write_checkpoint(folder/"checkpoint_after.npz",actor,critic,
+                        {**config,"adaptation_mode":mode,"adaptation_seed":seed,
+                         "adaptation_reference_sha256":staged["reference_sha256"]})
             print(json.dumps(summary),flush=True)
-            pd.DataFrame(records).to_csv(args.output/"comparison.csv",index=False)
+            if args.save_data:pd.DataFrame(records).to_csv(args.output/"comparison.csv",index=False)
         plot_comparison(traces,args.output/f"seed_{seed}")
     frame=pd.DataFrame(records)
     columns=["total_reward","mean_cte_all_m","max_cte_all_m","mean_cte_post_m",
              "solver_success_pct","completion_pct","loop_p95_ms","reached_end","failure_terminal"]
-    frame.groupby("mode")[columns].agg(["mean","std"]).to_csv(args.output/"summary_by_mode.csv")
+    if args.save_data:
+        frame.groupby("mode")[columns].agg(["mean","std"]).to_csv(args.output/"summary_by_mode.csv")
+    staging.cleanup()
 
 
 if __name__=="__main__":main()
