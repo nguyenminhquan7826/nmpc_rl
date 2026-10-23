@@ -2,6 +2,7 @@
 
 Adaptation modes learn on the supplied route and are not frozen test scores.
 The optional frozen_sampled control isolates sampling from parameter updates.
+Frozen resets the trained Actor heads and P to initial Q/R/P, then locks them.
 """
 import argparse
 import json
@@ -168,6 +169,7 @@ def main(argv=None):
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
         "fixed_definition":"checkpoint_initial_Q_R_P",
+        "frozen_definition":"trained_hidden_layers_reset_heads_and_P_to_initial_no_updates",
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
         "checkpoint_config":config,
@@ -181,6 +183,8 @@ def main(argv=None):
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
             if mode=="fixed":
                 actor,critic=initial_fixed_policy(config,low,high)
+            elif mode=="frozen":
+                actor,critic=initialize_adaptation(actor,critic,config,low,high,"initial_heads")
             elif mode in ("actor_adapt","critic_adapt","full_adapt","frozen_sampled"):
                 actor,critic=initialize_adaptation(actor,critic,config,low,high,args.adapt_start)
             env=TrainEnvironment(train_length_m=b.CAD_S_END,
