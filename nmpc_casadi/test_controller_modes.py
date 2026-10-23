@@ -12,6 +12,26 @@ from run_experiment import FixedWeightActor
 
 
 class ModeTests(unittest.TestCase):
+    def test_custom_eval_configuration_is_synchronized_and_serializable(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"source.npz";fresh_checkpoint(path)
+            original=path.read_bytes()
+            actor,critic,cfg,low,high=load_checkpoint(path,0)
+            self.assertEqual(cfg["initial_Q"],[17,4,70,3.1,51.,51.])
+            self.assertEqual(cfg["initial_R"],[15,200])
+            self.assertEqual(cfg["R_upper"],[30.,800.])
+            self.assertEqual(cfg["critic_lr"],20000.)
+            np.testing.assert_array_equal(actor.lower,np.r_[low[0],low[1]])
+            np.testing.assert_array_equal(actor.upper,np.r_[high[0],high[1]])
+            np.testing.assert_array_equal(critic.lower,low[2])
+            np.testing.assert_array_equal(critic.upper,high[2])
+            np.testing.assert_allclose(cfg["fixed_Qf"],15*np.array(cfg["initial_Q"]))
+            json.dumps(cfg)
+            self.assertEqual(path.read_bytes(),original)
+            with self.assertRaisesRegex(ValueError,"initial_heads"):
+                initialize_adaptation(actor,critic,cfg,low,high,"trained")
+
     def test_fixed_terminal_is_independent_of_critic_initial_P(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"source.npz";fresh_checkpoint(path)

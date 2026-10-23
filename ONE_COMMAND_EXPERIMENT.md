@@ -434,3 +434,21 @@ Both fields are saved in the evaluation settings when --save-data is enabled.
 The original training driver and its checkpoint initial metadata are unchanged.
 Custom evaluation initial metadata still requires the loader support described
 above before reloading adapted checkpoints whose initials differ from training.
+
+## Single evaluation bounds/initialization block
+
+load_checkpoint now declares Q/R/P lower and upper arrays exactly once after
+validating the original checkpoint. The selected R upper bound is [30,800],
+not the obsolete later override [20,300]. Nominal Q is [17,4,70,3.1,51,51],
+R is [15,200], fixed_Qf is 15*Q, and initial_P is its independent copy.
+Actor LR is 1e-5, Critic LR 20000, Pr LR factor .05 as requested. These are
+experimental settings, not a certified range or recommended optimum.
+
+Validation precedes simulation, records list-valued settings, and synchronizes
+live Actor/Critic bounds once. Original initial weights and bounds are retained
+as source_initial_weights/source_weight_bounds for traceability; input file is
+not changed. With changed physical ranges use initial_heads or fresh; trained
+is explicitly rejected to prevent silently remapping pretrained outputs.
+Default output remains three images per seed; --save-data saves actual settings.
+Checkpoint-after reload compatibility with legacy training-only loaders remains
+as described above; storing source metadata does not change those loaders.
