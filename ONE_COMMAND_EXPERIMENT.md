@@ -452,3 +452,41 @@ is explicitly rejected to prevent silently remapping pretrained outputs.
 Default output remains three images per seed; --save-data saves actual settings.
 Checkpoint-after reload compatibility with legacy training-only loaders remains
 as described above; storing source metadata does not change those loaders.
+
+## Isolate Actor learning and score the final controllers
+
+Add `--actor-diagnostics` to evaluate_controller_modes.py. The normal five
+modes and their initialization/hyperparameters are unchanged. The flag adds
+`critic_adapt_sampled`: Q/R are sampled using the same seeded Actor policy as
+Full adapt, but Actor parameters are frozen while Critic P updates. Compare it
+with Full adapt to measure enabling Actor learning, and with deterministic
+Critic-only to measure enabling Q/R sampling. State/P trajectories can diverge
+between these closed-loop runs even with matched random draws.
+
+After each mode, a new environment starts at the same route/initial offset.
+The exact final Actor and P are retained in memory (no head reset, checkpoint
+reload, or P reinitialization). Sampling and all learning are disabled. This
+is a deterministic assessment of the final controller on the adaptation route,
+not independent held-out evaluation. Actor may still output state-dependent
+Q/R with fixed parameters; final P stays constant.
+
+Online plots stay in `seed_N/`; deterministic final-controller plots are in
+`seed_N/post_adaptation/`. With `--save-data`, the separate score tables are
+`comparison.csv` and `post_adaptation_comparison.csv`, with corresponding
+`summary_by_mode.csv` and `post_adaptation_summary_by_mode.csv`. Final rollout
+logs are in `seed_N/post_adaptation/MODE/trajectory.csv`. They do not overwrite
+online logs/checkpoints. Without `--save-data`, only plots are saved.
+
+Online CSV logs additionally contain pre-update `obs_0..16`, `mu_0..7`,
+`latent_0..7`, `q_det_0..5`, and `r_det_0..1`, alongside sampled q/r, sigma,
+TD and parameter step norms. q_det/r_det are the physical mapping at the
+latent mean for the same observation, not E[Q/R] after nonlinear mapping.
+
+Example from nmpc_casadi (use a fresh output folder):
+
+```bash
+python evaluate_controller_modes.py --checkpoint results_v11_best/checkpoint_best_frozen.npz --reference test_reference/test_xref.csv --output evaluation_actor_diagnostics --max-steps 2500 --seeds 0 1 2 --adapt-start initial_heads --actor-diagnostics --sampling-control --save-data
+```
+
+For comparisons with earlier runs, restore the exact initial Q/R/P, bounds
+and learning rates in load_checkpoint; diagnostic flags do not change them.

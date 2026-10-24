@@ -29,6 +29,8 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
         if update_actor and not sample_actions:
             raise ValueError("Actor score-function learning requires sampled actions")
         proposal=actor.propose(obs.features,deterministic=not sample_actions)
+        # Same pre-update observation/policy; deterministic outputs are not E[Q/R].
+        q_det,r_det=actor.physical_diagonals(proposal.mu)
         p_before=critic.p.copy()
         nxt,reward,terminated,truncated,diag=env.step(
             proposal.q_diagonal,proposal.r_diagonal,critic,obs)
@@ -61,7 +63,9 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
              "critic_param_step_norm":update.critic_param_step_norm}
         for prefix,values in (("q",proposal.q_diagonal),("r",proposal.r_diagonal),
                               ("p",p_before),("p_after",critic.p),
-                              ("sigma",proposal.sigma)):
+                              ("sigma",proposal.sigma),("mu",proposal.mu),
+                              ("latent",proposal.latent),("q_det",q_det),("r_det",r_det),
+                              ("obs",obs.features)):
             row.update({f"{prefix}_{i}":float(v) for i,v in enumerate(values)})
         rows.append(row)
         row.update({f"critic_gradient_{i}":float(v)
