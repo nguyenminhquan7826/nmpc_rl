@@ -1,8 +1,8 @@
-"""Compare five controller modes from independent copies of one checkpoint.
+"""Compare four online controller modes from independent copies of one checkpoint.
 
 Adaptation modes learn on the supplied route and are not frozen test scores.
-The optional frozen_sampled control isolates sampling from parameter updates.
-Frozen resets the trained Actor heads and P to initial Q/R/P, then locks them.
+The CLI runs Fixed, Actor adapt, Critic adapt and Full adapt only.
+Legacy diagnostic helpers remain available to existing analysis/tests.
 """
 import argparse
 import json
@@ -22,7 +22,7 @@ from train_rl_environment import TrainEnvironment
 from training_initialization import TRAIN_REFERENCE_SHA256
 from run_experiment import FixedWeightActor
 
-MODES=("fixed","frozen","actor_adapt","critic_adapt","full_adapt")
+MODES=("fixed","actor_adapt","critic_adapt","full_adapt")
 ADAPTING_MODES=("actor_adapt","critic_adapt","full_adapt","critic_adapt_sampled")
 
 
@@ -248,12 +248,12 @@ def main(argv=None):
     ap.add_argument("--seeds",type=int,nargs="+",default=[0,1,2])
     ap.add_argument("--ey",type=float,default=.05)
     ap.add_argument("--heading-deg",type=float,default=0.)
-    ap.add_argument("--sampling-control",action="store_true")
+    ap.add_argument("--sampling-control",action="store_true",help="Deprecated: ignored; evaluation now runs four modes only")
     ap.add_argument("--actor-advantage-design",choices=("full_horizon","rollout_block"),default="full_horizon")
     ap.add_argument("--actor-advantage-steps",type=int,default=1,
         help="1 keeps TD0; 20 collects fixed-Actor blocks and updates with mean n-step advantages")
     ap.add_argument("--actor-diagnostics",action="store_true",
-        help="Add sampled Q/R with frozen Actor and learning Critic; score each final controller deterministically on a fresh rollout")
+        help="Save additional Full adapt Actor diagnostic plot; no extra modes or post-adaptation runs")
     ap.add_argument("--adapt-start",choices=("initial_heads","fresh","trained"),
                     default="initial_heads",
                     help="Default: retain learned hidden layers, reset Q/R heads and P to fixed initial values")
@@ -280,9 +280,9 @@ def main(argv=None):
         "reference_sha256":staged["reference_sha256"],
         "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
         "fixed_definition":"initial_Q_R_and_separate_fixed_Qf",
-        "frozen_definition":"trained_hidden_layers_reset_heads_and_P_to_initial_no_updates",
-        "actor_diagnostics_definition":"critic_adapt_sampled freezes Actor, samples Q/R, updates P; final scoring retains final agents, resets plant, disables sampling and learning",
-        "post_adaptation_reference_role":"same adaptation route, not held-out",
+        "modes":list(MODES),
+        "actor_diagnostics_definition":"extra Full adapt diagnostic plot only",
+        "evaluation_role":"online_four_modes_only",
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
         "checkpoint_config":config,
@@ -290,13 +290,9 @@ def main(argv=None):
     if args.save_data:
         (args.output/"evaluation_config.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
     records=[]
-    final_records=[]
     for seed in args.seeds:
         traces={}
-        final_traces={}
-        selected_modes=MODES+(("frozen_sampled",) if args.sampling_control else ())
-        if args.actor_diagnostics:selected_modes+=("critic_adapt_sampled",)
-        for mode in selected_modes:
+        for mode in MODES:
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
             config["actor_advantage_steps"]=args.actor_advantage_steps;config["actor_advantage_design"]=args.actor_advantage_design
             if mode=="fixed":
@@ -321,37 +317,16 @@ def main(argv=None):
                         {**config,"adaptation_mode":mode,"adaptation_seed":seed,
                          "adaptation_start":args.adapt_start,
                          "adaptation_reference_sha256":staged["reference_sha256"]})
-            if args.actor_diagnostics:
-                # The final terminal P also initializes the fresh plant's solver.
-                final_env=TrainEnvironment(train_length_m=b.CAD_S_END,
-                    q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
-                    p_initial=critic.p.copy(),
-                    task_qe=np.array(config["Qe_fixed"]),task_re=np.array(config["Re_fixed"]),
-                    max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg)
-                final_summary,final_log=evaluate_final_policy(final_env,actor,critic,config,mode)
-                final_summary["seed"]=seed
-                final_records.append(final_summary);final_traces[mode]=final_log
-                if args.save_data:
-                    folder=args.output/f"seed_{seed}"/"post_adaptation"/mode
-                    folder.mkdir(parents=True,exist_ok=True)
-                    final_log.to_csv(folder/"trajectory.csv",index=False)
-                    pd.DataFrame(final_records).to_csv(args.output/"post_adaptation_comparison.csv",index=False)
-                print(json.dumps(final_summary),flush=True)
             print(json.dumps(summary),flush=True)
             if args.save_data:pd.DataFrame(records).to_csv(args.output/"comparison.csv",index=False)
         plot_comparison(traces,args.output/f"seed_{seed}")
         if args.actor_diagnostics:
             plot_actor_diagnostics(traces["full_adapt"],args.output/f"seed_{seed}")
-        if final_traces:
-            plot_comparison(final_traces,args.output/f"seed_{seed}"/"post_adaptation",phase="post")
     frame=pd.DataFrame(records)
     columns=["total_reward","mean_cte_all_m","max_cte_all_m","mean_cte_post_m",
              "solver_success_pct","completion_pct","loop_p95_ms","reached_end","failure_terminal"]
     if args.save_data:
         frame.groupby("mode")[columns].agg(["mean","std"]).to_csv(args.output/"summary_by_mode.csv")
-        if final_records:
-            pd.DataFrame(final_records).groupby("mode")[columns].agg(["mean","std"]).to_csv(
-                args.output/"post_adaptation_summary_by_mode.csv")
     staging.cleanup()
 
 
