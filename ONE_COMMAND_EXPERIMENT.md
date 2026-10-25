@@ -490,3 +490,38 @@ python evaluate_controller_modes.py --checkpoint results_v11_best/checkpoint_bes
 
 For comparisons with earlier runs, restore the exact initial Q/R/P, bounds
 and learning rates in load_checkpoint; diagnostic flags do not change them.
+
+## Experimental Actor rollout advantage (up to 20 steps)
+
+Use `--actor-advantage-steps 20` with evaluate_controller_modes.py; the default
+`1` retains the previous per-transition TD0 behavior. Only modes that learn
+Actor change. Critic still updates each transition with its configured rule.
+
+The Actor is frozen while collecting each block of 20 transitions, then takes
+one SGD step on the mean score-function loss over that block. All transitions
+are used once. The oldest sample has horizon 20, the next 19, down to 1; this
+is standard rollout-block n-step updating, NOT a full 20-step target for every
+sample. A partial last block is also used. There is no replay of samples after
+the policy changes, no implicit LR multiplier, and no advantage normalization.
+Thus LR=3e-6 is still 3e-6 per mean-gradient batch update, about 75 Actor updates
+per 1500-step rollout rather than 1500. Compare both update count and targets.
+
+At block start, copy the six physical P coefficients for value evaluation.
+All baselines and the tail bootstrap use this same snapshot, avoiding a target
+that mixes multiple versions of P. Live P/Qf still changes through Critic during
+the rollout, so the combined controller remains nonstationary. Real terminal
+states have zero bootstrap; time-limit truncations retain the snapshot value.
+The update rule is experimental and differs from the paper's one-step Actor.
+
+Logs keep `td` as the original pre-update TD(0) for Critic. New columns:
+- `actor_advantage`, `actor_target`, `actor_advantage_horizon`: assigned back to
+  each originating sampled action after its block completes.
+- `actor_update_applied`, `actor_batch_size`: show actual optimizer events.
+- `actor_param_step_norm`: actual update norm on the block's final row, zero
+  on rows without an Actor update.
+The summary's `actor_updates` counts optimizer steps; `actor_training_samples`
+counts transitions used. Post-adaptation evaluation still freezes both agents.
+
+```bash
+python evaluate_controller_modes.py --checkpoint results_v11_best/checkpoint_best_frozen.npz --reference test_reference/test_xref.csv --output evaluation_actor_n20 --max-steps 2500 --seeds 0 1 2 --adapt-start initial_heads --actor-diagnostics --sampling-control --actor-advantage-steps 20 --save-data
+```

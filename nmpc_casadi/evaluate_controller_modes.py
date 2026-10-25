@@ -227,7 +227,9 @@ def plot_actor_diagnostics(log, output):
         ax.set_ylabel(label)
     axes[3].plot(x,log.td,label="Pre-update TD")
     axes[3].axhline(0,color="black",linestyle="--",linewidth=.6)
-    axes[3].set_ylabel("TD")
+    if "actor_advantage" in log:
+        axes[3].plot(x,log.actor_advantage,label="Actor advantage (assigned to sampled action)",alpha=.7)
+    axes[3].set_ylabel("TD / advantage")
     axes[4].plot(x,log.actor_param_step_norm.cumsum(),label="Cumulative update path length")
     axes[4].set_ylabel("Actor update path")
     for ax in axes:ax.grid(alpha=.25);ax.legend(fontsize=8)
@@ -247,6 +249,8 @@ def main(argv=None):
     ap.add_argument("--ey",type=float,default=.05)
     ap.add_argument("--heading-deg",type=float,default=0.)
     ap.add_argument("--sampling-control",action="store_true")
+    ap.add_argument("--actor-advantage-steps",type=int,default=1,
+        help="1 keeps TD0; 20 collects fixed-Actor blocks and updates with mean n-step advantages")
     ap.add_argument("--actor-diagnostics",action="store_true",
         help="Add sampled Q/R with frozen Actor and learning Critic; score each final controller deterministically on a fresh rollout")
     ap.add_argument("--adapt-start",choices=("initial_heads","fresh","trained"),
@@ -256,10 +260,12 @@ def main(argv=None):
     args=ap.parse_args(argv)
     if args.adapt_start=="trained":
         ap.error("Custom evaluation bounds require --adapt-start initial_heads or fresh")
+    if args.actor_advantage_steps<1:ap.error("--actor-advantage-steps must be positive")
     if args.max_steps<1 or len(set(args.seeds))!=len(args.seeds):ap.error("Invalid steps/seeds")
     if args.output.exists() and any(args.output.iterdir()):ap.error("Output must be empty")
     # Validate checkpoint before staging. Saved bounds, not editable config.
     _,_,config,_,_=load_checkpoint(args.checkpoint,args.seeds[0])
+    config["actor_advantage_steps"]=args.actor_advantage_steps
     args.output.mkdir(parents=True,exist_ok=True)
     staging=tempfile.TemporaryDirectory(prefix="nmpc-evaluation-")
     details,staged=prepare_cad_evaluation_reference(args.reference,Path(staging.name),b.TAIL_LENGTH_M,
@@ -291,6 +297,7 @@ def main(argv=None):
         if args.actor_diagnostics:selected_modes+=("critic_adapt_sampled",)
         for mode in selected_modes:
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
+            config["actor_advantage_steps"]=args.actor_advantage_steps
             if mode=="fixed":
                 actor,critic=initial_fixed_policy(config,low,high)
             elif mode=="frozen":

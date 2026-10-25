@@ -14,6 +14,7 @@ import pandas as pd
 
 import baseline as b
 from actor_critic_updates import learn_one_transition
+from nstep_actor import block_advantages, update_actor_block
 from experiment_d_penalties import compute_training_reward
 from evaluate_frozen_actor_critic import load_frozen_agents, metrics_from_rows
 from train_actor_critic import write_checkpoint
@@ -21,9 +22,14 @@ from train_actor_critic import write_checkpoint
 
 def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
                      update_critic=True, sample_actions=True):
-    """Apply old weights, observe transition, update both, then act again."""
+    """Update Critic each transition; Actor uses TD0 or fixed-policy rollout blocks."""
+    horizon=config.get("actor_advantage_steps",1)
+    if isinstance(horizon,bool) or not isinstance(horizon,(int,np.integer)) or horizon<1:
+        raise ValueError("actor_advantage_steps must be a positive integer")
+    delayed=bool(update_actor and horizon>1)
     obs=env.reset()
-    rows=[]
+    rows=[];pending=[];p_snapshot=None;actor_updates=0;actor_samples=0
+
     for _ in range(env.max_steps):
         loop_start=time.perf_counter()
         if update_actor and not sample_actions:
@@ -32,6 +38,7 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
         # Same pre-update observation/policy; deterministic outputs are not E[Q/R].
         q_det,r_det=actor.physical_diagonals(proposal.mu)
         p_before=critic.p.copy()
+        if delayed and not pending:p_snapshot=p_before.copy()
         nxt,reward,terminated,truncated,diag=env.step(
             proposal.q_diagonal,proposal.r_diagonal,critic,obs)
         breakdown=compute_training_reward(
@@ -48,7 +55,7 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
             critic_update_mode=config.get("critic_update_mode","semi_gradient"),
             actor_mu_reg_coef=config.get("actor_mu_reg_coef",0.),
             actor_mu_reg_threshold=config.get("actor_mu_reg_threshold",2.),
-            update_actor=update_actor,update_critic=update_critic)
+            update_actor=update_actor and not delayed,update_critic=update_critic)
         row={**diag,"controller":"online_adaptation",
              "t_s":len(rows)*b.Ts,"X_m":float(obs.physical[4]),
              "Y_m":float(obs.physical[5]),
@@ -67,7 +74,29 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
                               ("latent",proposal.latent),("q_det",q_det),("r_det",r_det),
                               ("obs",obs.features)):
             row.update({f"{prefix}_{i}":float(v) for i,v in enumerate(values)})
+        row.update(actor_advantage=(update.td if update_actor and not delayed else np.nan),
+                   actor_target=(update.td+update.value_current if update_actor and not delayed else np.nan),
+                   actor_advantage_horizon=(1 if update_actor and not delayed else 0),
+                   actor_batch_size=(1 if update_actor and not delayed else 0),
+                   actor_update_applied=bool(update_actor and not delayed))
         rows.append(row)
+        if delayed:
+            pending.append((obs.features.copy(),proposal.latent.copy(),obs.error.copy(),
+                            breakdown.training_reward,row))
+            if len(pending)>=horizon or terminated or truncated or len(rows)>=env.max_steps:
+                advantages,targets=block_advantages(
+                    [v[3] for v in pending],[v[2] for v in pending],nxt.error,
+                    p_snapshot,config["gamma"],terminated)
+                loss,step_norm=update_actor_block(actor,[v[0] for v in pending],
+                    [v[1] for v in pending],advantages,config)
+                for i,entry in enumerate(pending):
+                    entry[4].update(actor_advantage=float(advantages[i]),actor_target=float(targets[i]),
+                                    actor_advantage_horizon=len(pending)-i)
+                row.update(actor_param_step_norm=step_norm,actor_batch_size=len(pending),
+                           actor_update_applied=True,actor_batch_loss=loss)
+                actor_updates+=1;actor_samples+=len(pending);pending.clear()
+        elif update_actor:
+            actor_updates+=1;actor_samples+=1
         row.update({f"critic_gradient_{i}":float(v)
                     for i,v in enumerate(update.critic_gradient)})
         row["loop_ms"]=1000*(time.perf_counter()-loop_start)
@@ -76,8 +105,10 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
             break
     log=pd.DataFrame(rows)
     summary=metrics_from_rows(log,config["gamma"],b.CAD_S_END)
-    summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log) if update_actor or update_critic else 0,
-                   actor_updates=len(log) if update_actor else 0,
+    summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log) if update_critic else actor_updates,
+                   actor_updates=actor_updates,actor_training_samples=actor_samples,
+                   actor_advantage_steps=horizon,
+                   actor_update_rule="rollout_block_mean_gradient" if horizon>1 else "TD0",
                    critic_updates=len(log) if update_critic else 0,
                    critic_update_mode=config.get("critic_update_mode","semi_gradient"),
                    action_mode="sampled_gaussian" if sample_actions else "deterministic_mean",
@@ -103,7 +134,7 @@ def plot_online(log, output):
         ax.set_ylabel({"q":"Q diagonal","r":"R diagonal","p":"Qf applied"}[prefix])
         ax.legend(ncol=3);ax.grid(alpha=.25)
     axes[-1].set_xlabel("Path progress (m)")
-    fig.suptitle("Online adaptation: Actor and Critic update every transition")
+    fig.suptitle("Online adaptation: applied Actor weights and Critic terminal cost")
     fig.tight_layout();fig.savefig(root/"online_weights.png",dpi=180);plt.close(fig)
     fig,ax=plt.subplots(figsize=(9,7))
     ax.plot(log.X_ref_m,log.Y_ref_m,"k--",label="Reference")
