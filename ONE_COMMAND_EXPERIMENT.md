@@ -590,3 +590,26 @@ endpoint heading/rate. Filtering trades delay for reduced quantization noise;
 metrics apply only to this motion. Cumulative encoder travel is not X/Y
 position. The next integration needs odometry/state estimation and explicit
 handling of 100 Hz sensors versus the controller's 71 ms period.
+
+## Encoder/IMU odometry diagnostic
+
+simulate_sensors.py now also outputs odometry_diagnostics.png and true/estimated
+X/Y columns in sensor_log.csv. Run with a new output directory:
+
+```bash
+python simulate_sensors.py --output odometry_trial --seed 0 --duration 30
+```
+
+encoder_imu_odometry.py integrates signed count travel using the circular
+midpoint of successive measured fused-yaw angles. A separate estimator uses
+filtered speed for comparison (filter delay can worsen position error).
+Initial pose is explicitly known (0,0,0 in this demo); after initialization the
+estimator receives only count deltas and measured yaw, never true X/Y.
+The analytic no-slip ground truth is integrated with true midpoint heading at
+10 ms; this is a kinematic diagnostic, not the dynamic vehicle/controller test.
+No lateral slip, wheel slip or wheel-radius error is simulated. Yaw rate is
+logged for later state estimation but is not fused again with BNO055 fused yaw.
+This is odometry, not an EKF or a full six-state observer; vy estimation and
+integration with the four controller modes remain a separate next step.
+Position metrics are 2D Euclidean errors, not reference-path CTE. With no
+absolute position observations, bias can accumulate into position drift.
