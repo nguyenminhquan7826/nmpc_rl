@@ -552,3 +552,41 @@ and existing Actor horizon settings are preserved. There is no automatic
 post-adaptation evaluation. --actor-diagnostics only adds its Full plot;
 legacy --sampling-control is accepted but ignored. Historical sections above
 describe older experiments and helper APIs, not the current CLI selection.
+
+## Encoder and illustrative BNO055 sensor-only diagnostic
+
+From nmpc_casadi:
+
+```bash
+python simulate_sensors.py --output sensor_trial --seed 0 --duration 30
+```
+
+This standalone analytic-motion experiment validates sensor measurements before
+integration with the controller. It does NOT run the vehicle plant, estimate
+X/Y, or change any four-mode evaluation behavior. Outputs: sensor_log.csv,
+sensor_config.json (all assumptions and metrics), sensor_diagnostics.png.
+
+Encoder: 11 cycles/motor revolution, quadrature x4, gearbox 19:1,
+differential 38/13, wheel radius .0325 m; 2443.6923 counts per wheel revolution,
+0.0835635 mm/count. Accumulate continuous signed wheel travel and quantize
+cumulative counts (zero initial phase). Never round each interval separately.
+Read at 10 ms: raw speed resolution 8.35635 mm/s. No wheel slip, missed counts,
+or radius calibration error are included yet. Filter is first-order with
+50 ms time constant (starts at zero); pass --filter-tau 0 to disable.
+
+IMU outputs are simplified fused yaw and gyro yaw rate, not simulated raw
+accelerometer/magnetometer or the internal BNO055 fusion algorithm. White
+noise defaults: yaw .5 deg, rate .01 rad/s. Illustrative fixed biases: yaw .2
+deg, rate .002 rad/s; random-walk intensities .02 deg/sqrt(s) and .0002
+(rad/s)/sqrt(s), respectively. Bias walks scale with sqrt(dt); yaw wraps to
+[-pi,pi). None of these IMU noise magnitudes are asserted hardware specs.
+Options --yaw-noise-deg and --rate-noise change white noise only (not bias).
+SensorConfig in sensor_models.py contains all parameters for calibration.
+A separate RNG seed belongs to the sensor, independent of Actor exploration.
+
+The demo uses known analytic motion around .1 m/s with a slow speed variation
+and sinusoidal heading; comparisons are against exact interval speed and
+endpoint heading/rate. Filtering trades delay for reduced quantization noise;
+metrics apply only to this motion. Cumulative encoder travel is not X/Y
+position. The next integration needs odometry/state estimation and explicit
+handling of 100 Hz sensors versus the controller's 71 ms period.
