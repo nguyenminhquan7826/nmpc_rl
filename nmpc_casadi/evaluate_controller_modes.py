@@ -101,7 +101,7 @@ def load_checkpoint(path, seed):
     actor.rng = np.random.default_rng(seed)
     config["evaluation_overrides_applied"] = True
 
-    config["actor_lr"] = 6e-4
+    config["actor_lr"] = 5e-4
     config["critic_lr"] = 50000.0
     config["actor_output_lr_factors"] = [1.0, 1.0, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5]
     config["critic_p_lr_factors"] = [0.5, 0.5, 0.1, 0.05, 4.0, 4.0]
