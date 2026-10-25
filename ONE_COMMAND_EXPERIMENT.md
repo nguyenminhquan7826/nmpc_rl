@@ -541,3 +541,14 @@ This avoids stale-policy replay but uses fewer samples and optimizer steps;
 there is no hidden LR scaling. Compare with the previous design using
 `--actor-advantage-design rollout_block`. Full horizon is an experimental
 change, not an established improvement in tracking performance.
+
+## Current evaluation: four online modes only
+
+The CLI now runs exactly fixed, actor_adapt, critic_adapt, full_adapt.
+Fixed holds initial Q/R/fixed_Qf. Actor adapt learns NN and Q/R while P is
+fixed. Critic adapt holds Q/R and learns P, applying Qf=diag(P) on the next
+control step. Full learns both. Independent initialization/seed per mode
+and existing Actor horizon settings are preserved. There is no automatic
+post-adaptation evaluation. --actor-diagnostics only adds its Full plot;
+legacy --sampling-control is accepted but ignored. Historical sections above
+describe older experiments and helper APIs, not the current CLI selection.
