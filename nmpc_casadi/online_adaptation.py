@@ -14,7 +14,7 @@ import pandas as pd
 
 import baseline as b
 from actor_critic_updates import learn_one_transition
-from nstep_actor import block_advantages, update_actor_block
+from nstep_actor import block_advantages, update_actor_block, full_horizon_advantages
 from experiment_d_penalties import compute_training_reward
 from evaluate_frozen_actor_critic import load_frozen_agents, metrics_from_rows
 from train_actor_critic import write_checkpoint
@@ -26,7 +26,10 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
     horizon=config.get("actor_advantage_steps",1)
     if isinstance(horizon,bool) or not isinstance(horizon,(int,np.integer)) or horizon<1:
         raise ValueError("actor_advantage_steps must be a positive integer")
+    design=config.get("actor_advantage_design","full_horizon")
+    if design not in ("full_horizon","rollout_block"):raise ValueError("Unknown Actor advantage design")
     delayed=bool(update_actor and horizon>1)
+    collect=2*horizon-1 if design=="full_horizon" else horizon
     obs=env.reset()
     rows=[];pending=[];p_snapshot=None;actor_updates=0;actor_samples=0
 
@@ -83,18 +86,26 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
         if delayed:
             pending.append((obs.features.copy(),proposal.latent.copy(),obs.error.copy(),
                             breakdown.training_reward,row))
-            if len(pending)>=horizon or terminated or truncated or len(rows)>=env.max_steps:
-                advantages,targets=block_advantages(
-                    [v[3] for v in pending],[v[2] for v in pending],nxt.error,
-                    p_snapshot,config["gamma"],terminated)
-                loss,step_norm=update_actor_block(actor,[v[0] for v in pending],
-                    [v[1] for v in pending],advantages,config)
-                for i,entry in enumerate(pending):
-                    entry[4].update(actor_advantage=float(advantages[i]),actor_target=float(targets[i]),
-                                    actor_advantage_horizon=len(pending)-i)
-                row.update(actor_param_step_norm=step_norm,actor_batch_size=len(pending),
-                           actor_update_applied=True,actor_batch_loss=loss)
-                actor_updates+=1;actor_samples+=len(pending);pending.clear()
+            if len(pending)>=collect or terminated or truncated or len(rows)>=env.max_steps:
+                rewards=[v[3] for v in pending];errors=[v[2] for v in pending]
+                if design=="full_horizon":
+                    advantages,targets,horizons=full_horizon_advantages(
+                        rewards,errors,nxt.error,p_snapshot,config["gamma"],terminated,horizon)
+                else:
+                    advantages,targets=block_advantages(rewards,errors,nxt.error,
+                        p_snapshot,config["gamma"],terminated)
+                    horizons=list(range(len(pending),0,-1))
+                count=len(advantages)
+                if count:
+                    loss,step_norm=update_actor_block(actor,[v[0] for v in pending[:count]],
+                        [v[1] for v in pending[:count]],advantages,config)
+                    for i,entry in enumerate(pending[:count]):
+                        entry[4].update(actor_advantage=float(advantages[i]),actor_target=float(targets[i]),
+                                        actor_advantage_horizon=horizons[i])
+                    row.update(actor_param_step_norm=step_norm,actor_batch_size=count,
+                               actor_update_applied=True,actor_batch_loss=loss)
+                    actor_updates+=1;actor_samples+=count
+                pending.clear()
         elif update_actor:
             actor_updates+=1;actor_samples+=1
         row.update({f"critic_gradient_{i}":float(v)
@@ -107,8 +118,9 @@ def adaptive_rollout(env, actor, critic, config, *, update_actor=True,
     summary=metrics_from_rows(log,config["gamma"],b.CAD_S_END)
     summary.update(mode="ONLINE_ADAPTATION",parameter_updates=len(log) if update_critic else actor_updates,
                    actor_updates=actor_updates,actor_training_samples=actor_samples,
-                   actor_advantage_steps=horizon,
-                   actor_update_rule="rollout_block_mean_gradient" if horizon>1 else "TD0",
+                   actor_advantage_steps=horizon,actor_advantage_design=design,
+                   actor_context_only_samples=(len(log)-actor_samples if update_actor else 0),
+                   actor_update_rule=design+"_mean_gradient" if horizon>1 else "TD0",
                    critic_updates=len(log) if update_critic else 0,
                    critic_update_mode=config.get("critic_update_mode","semi_gradient"),
                    action_mode="sampled_gaussian" if sample_actions else "deterministic_mean",

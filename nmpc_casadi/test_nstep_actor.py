@@ -2,7 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 import numpy as np
-from nstep_actor import block_advantages,update_actor_block
+from nstep_actor import block_advantages,update_actor_block,full_horizon_advantages
 from test_frozen_actor_critic_eval import fresh_checkpoint
 from evaluate_controller_modes import load_checkpoint,initialize_adaptation,run_mode,evaluate_final_policy
 from train_rl_environment import TrainEnvironment
@@ -18,6 +18,17 @@ class NstepTests(unittest.TestCase):
         np.testing.assert_allclose(target,[-.25,-2.5,-9.])
         np.testing.assert_allclose(adv,target+6)
 
+    def test_full_targets_and_terminal_tail(self):
+        e=np.ones((5,6));p=np.ones(6);end=np.ones(6)*2
+        adv,target,h=full_horizon_advantages([1,2,3,4,5],e,end,p,.5,False,3)
+        np.testing.assert_allclose(target,[2,3.75,3.25])
+        self.assertEqual(h,[3,3,3])
+        adv,target,h=full_horizon_advantages([1,2,3,4,5],e,end,p,.5,True,3)
+        np.testing.assert_allclose(target,[2,3.75,6.25,6.5,5])
+        self.assertEqual(h,[3,3,3,2,1])
+        adv,target,h=full_horizon_advantages([1,2],e[:2],end,p,.5,False,3)
+        self.assertEqual(len(adv),0)
+
     def test_block_schedule_and_frozen_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'model.npz';fresh_checkpoint(path)
@@ -25,6 +36,7 @@ class NstepTests(unittest.TestCase):
                 a,c,cfg,lo,hi=load_checkpoint(path,4)
                 a,c=initialize_adaptation(a,c,cfg,lo,hi,'initial_heads')
                 cfg['actor_advantage_steps']=20
+                cfg['actor_advantage_design']='rollout_block'
                 env=TrainEnvironment(train_length_m=b.CAD_S_END,
                     q_initial=np.array(cfg['initial_Q']),r_initial=np.array(cfg['initial_R']),
                     p_initial=c.p.copy(),task_qe=np.array(cfg['Qe_fixed']),task_re=np.array(cfg['Re_fixed']),

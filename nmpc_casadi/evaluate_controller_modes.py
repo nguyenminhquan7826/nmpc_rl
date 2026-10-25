@@ -249,6 +249,7 @@ def main(argv=None):
     ap.add_argument("--ey",type=float,default=.05)
     ap.add_argument("--heading-deg",type=float,default=0.)
     ap.add_argument("--sampling-control",action="store_true")
+    ap.add_argument("--actor-advantage-design",choices=("full_horizon","rollout_block"),default="full_horizon")
     ap.add_argument("--actor-advantage-steps",type=int,default=1,
         help="1 keeps TD0; 20 collects fixed-Actor blocks and updates with mean n-step advantages")
     ap.add_argument("--actor-diagnostics",action="store_true",
@@ -265,7 +266,7 @@ def main(argv=None):
     if args.output.exists() and any(args.output.iterdir()):ap.error("Output must be empty")
     # Validate checkpoint before staging. Saved bounds, not editable config.
     _,_,config,_,_=load_checkpoint(args.checkpoint,args.seeds[0])
-    config["actor_advantage_steps"]=args.actor_advantage_steps
+    config["actor_advantage_steps"]=args.actor_advantage_steps;config["actor_advantage_design"]=args.actor_advantage_design
     args.output.mkdir(parents=True,exist_ok=True)
     staging=tempfile.TemporaryDirectory(prefix="nmpc-evaluation-")
     details,staged=prepare_cad_evaluation_reference(args.reference,Path(staging.name),b.TAIL_LENGTH_M,
@@ -297,7 +298,7 @@ def main(argv=None):
         if args.actor_diagnostics:selected_modes+=("critic_adapt_sampled",)
         for mode in selected_modes:
             actor,critic,config,low,high=load_checkpoint(args.checkpoint,seed)
-            config["actor_advantage_steps"]=args.actor_advantage_steps
+            config["actor_advantage_steps"]=args.actor_advantage_steps;config["actor_advantage_design"]=args.actor_advantage_design
             if mode=="fixed":
                 actor,critic=initial_fixed_policy(config,low,high)
             elif mode=="frozen":

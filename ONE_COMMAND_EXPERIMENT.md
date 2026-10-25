@@ -525,3 +525,19 @@ counts transitions used. Post-adaptation evaluation still freezes both agents.
 ```bash
 python evaluate_controller_modes.py --checkpoint results_v11_best/checkpoint_best_frozen.npz --reference test_reference/test_xref.csv --output evaluation_actor_n20 --max-steps 2500 --seeds 0 1 2 --adapt-start initial_heads --actor-diagnostics --sampling-control --actor-advantage-steps 20 --save-data
 ```
+
+## Full-horizon design (replaces mixed short targets for n>1)
+
+`--actor-advantage-design full_horizon` is now the default design (TD0 n=1 is
+unchanged). For n=20, freeze Actor for 39 transitions, build 20 targets each
+with exactly 20 rewards and the matching tail-state value, then apply one
+mean-gradient update. The trailing 19 transitions are future-reward context;
+they are never reused for Actor training after its parameters change. Critic
+still updates each transition; all Actor value targets use block-start P.
+At a time limit, train only origins with a complete horizon. At true terminal
+states, shorter terminal returns with zero bootstrap are valid and used.
+`actor_training_samples` and `actor_context_only_samples` report the tradeoff.
+This avoids stale-policy replay but uses fewer samples and optimizer steps;
+there is no hidden LR scaling. Compare with the previous design using
+`--actor-advantage-design rollout_block`. Full horizon is an experimental
+change, not an established improvement in tracking performance.

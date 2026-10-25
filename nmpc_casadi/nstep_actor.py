@@ -40,3 +40,19 @@ def update_actor_block(actor, observations, latents, advantages, config):
         raise FloatingPointError('Nonfinite Actor update')
     for k,v in new.items():actor.params[k][...]=v
     return loss,float(lr*np.sqrt(sum(np.sum(g*g) for g in grad.values())))
+
+
+def full_horizon_advantages(rewards, errors, next_error, p_snapshot, gamma, terminated, horizon):
+    """Only true termination shortens n; trailing samples supply context only."""
+    rewards=np.asarray(rewards,float);errors=np.asarray(errors,float);p=np.asarray(p_snapshot,float)
+    block_advantages(rewards,errors,next_error,p,gamma,terminated)
+    length=len(rewards);count=length if terminated else max(0,length-horizon+1)
+    targets=[];advantages=[];horizons=[]
+    for i in range(count):
+        end=min(i+horizon,length);n=end-i
+        target=float(np.dot(gamma**np.arange(n),rewards[i:end]))
+        if not (terminated and end==length):
+            tail=errors[end] if end<length else np.asarray(next_error)
+            target-=gamma**n*float(np.dot(p,tail**2))
+        targets.append(target);advantages.append(target+float(np.dot(p,errors[i]**2)));horizons.append(n)
+    return np.array(advantages),np.array(targets),horizons
