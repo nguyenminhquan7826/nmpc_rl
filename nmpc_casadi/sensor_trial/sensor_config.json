@@ -1,0 +1,27 @@
+{
+  "role": "analytic sensor diagnostic, no controller or position estimator",
+  "seed": 0,
+  "imu_settings_role": "illustrative assumptions, not measured BNO055 specifications",
+  "config": {
+    "sample_period_s": 0.01,
+    "wheel_radius_m": 0.0325,
+    "encoder_cycles_per_motor_rev": 11,
+    "quadrature_factor": 4,
+    "gearbox_ratio": 19.0,
+    "differential_ratio": 2.923076923076923,
+    "velocity_filter_tau_s": 0.05,
+    "yaw_noise_std_rad": 0.008726646259971648,
+    "yaw_rate_noise_std_rad_s": 0.01,
+    "yaw_bias_rad": 0.003490658503988659,
+    "yaw_rate_bias_rad_s": 0.002,
+    "yaw_bias_walk_std_rad_sqrt_s": 0.00034906585039886593,
+    "rate_bias_walk_std_rad_s_sqrt_s": 0.0002
+  },
+  "counts_per_wheel_rev": 2443.6923076923076,
+  "metres_per_count": 8.35635165035059e-05,
+  "speed_quantization_mps": 0.008356351650350589,
+  "raw_speed_rmse_mps": 0.0031370012538484452,
+  "filtered_speed_rmse_mps": 0.0011231933471371517,
+  "yaw_rmse_deg": 0.5549663581041895,
+  "yaw_rate_rmse_rad_s": 0.010225646238761574
+}
