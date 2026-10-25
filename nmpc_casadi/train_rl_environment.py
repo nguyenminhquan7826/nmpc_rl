@@ -65,6 +65,9 @@ class TrainEnvironment:
 
     def reset(self):
         self.rm=b.make_reference_manager()
+        # Independent progress trackers: noisy localization must not alter
+        # the true path-projection metrics or termination criterion.
+        self.true_rm=(self.rm if self.sensor is None else b.make_reference_manager())
         self.x,self.prev,self.guess,_=b.build_initial_state_and_guess(
             self.rm,self.solver,self.ey,np.deg2rad(self.heading_deg))
         self.k=0
@@ -81,7 +84,7 @@ class TrainEnvironment:
             measured,noise=self.sensor.measure(self.x,self.k)
         ref=self.rm.get_nmpc_reference(
             float(measured[4]),float(measured[5]),b.Ts,b.N)
-        true_ref=(ref if self.sensor is None else self.rm.get_nmpc_reference(
+        true_ref=(ref if self.sensor is None else self.true_rm.get_nmpc_reference(
             float(self.x[4]),float(self.x[5]),b.Ts,b.N))
         er=error_from_state(measured,ref["xref"][0])
         true_er=error_from_state(self.x,true_ref["xref"][0])
