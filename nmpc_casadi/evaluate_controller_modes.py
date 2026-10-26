@@ -19,6 +19,7 @@ from evaluate_frozen_actor_critic import frozen_rollout, load_frozen_agents
 from online_adaptation import adaptive_rollout
 from train_actor_critic import write_checkpoint
 from train_rl_environment import TrainEnvironment
+from gaussian_state_sensor import GaussianStateSensor, EXAMPLE_STD
 from training_initialization import TRAIN_REFERENCE_SHA256
 from run_experiment import FixedWeightActor
 
@@ -258,7 +259,22 @@ def main(argv=None):
                     default="initial_heads",
                     help="Default: retain learned hidden layers, reset Q/R heads and P to fixed initial values")
     ap.add_argument("--save-data",action="store_true",help="Also save CSV, settings and adapted checkpoints; default is images only")
+    ap.add_argument("--sensor-noise",action="store_true",
+        help="Enable illustrative iid Gaussian noise on all six measured states")
+    ap.add_argument("--sensor-std",type=float,nargs=6,default=None,
+        metavar=("VX","VY","PSI_RAD","R_RADPS","X","Y"),
+        help="Six sensor standard deviations in physical state units; default: 0.005 0.005 0.00872665 0.01 0.005 0.005")
+    ap.add_argument("--sensor-seed",type=int,default=10000,
+        help="Independent sensor RNG stream: base + evaluation seed, shared by all modes")
     args=ap.parse_args(argv)
+    if args.sensor_std is not None and not args.sensor_noise:
+        ap.error("--sensor-std requires --sensor-noise")
+    if args.sensor_seed<0:
+        ap.error("--sensor-seed must be nonnegative")
+    noise_std=EXAMPLE_STD if args.sensor_std is None else tuple(args.sensor_std)
+    if (len(noise_std)!=6 or not np.isfinite(noise_std).all() or
+        np.any(np.asarray(noise_std)<0)):
+        ap.error("--sensor-std must be six finite nonnegative values")
     if args.adapt_start=="trained":
         ap.error("Custom evaluation bounds require --adapt-start initial_heads or fresh")
     if args.actor_advantage_steps<1:ap.error("--actor-advantage-steps must be positive")
@@ -283,6 +299,16 @@ def main(argv=None):
         "modes":list(MODES),
         "actor_diagnostics_definition":"extra Full adapt diagnostic plot only",
         "evaluation_role":"online_four_modes_only",
+        "sensor_measurements":{
+            "enabled":bool(args.sensor_noise),"std_physical_units":list(noise_std),
+            "order":["vx_mps","vy_mps","psi_rad","r_radps","X_m","Y_m"],
+            "seed_by_evaluation_seed":"sensor_seed + evaluation_seed",
+            "base_seed":args.sensor_seed,
+            "same_sensor_noise_by_control_step_across_modes":True,
+            "plant_dynamics_use_true_state":True,
+            "rl_observation_and_td_use_measured_state":True,
+            "reported_cte_and_reward_use_true_plant":True,
+            "type":"independent_white_gaussian_experimental_not_sensor_calibration"},
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
         "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
         "checkpoint_config":config,
@@ -306,9 +332,14 @@ def main(argv=None):
                 q_initial=np.array(config["initial_Q"]),r_initial=np.array(config["initial_R"]),
                 p_initial=np.array(terminal_init),
                 task_qe=np.array(config["Qe_fixed"]),task_re=np.array(config["Re_fixed"]),
-                max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg)
+                max_steps=args.max_steps,ey=args.ey,heading_deg=args.heading_deg,
+                sensor=(GaussianStateSensor(noise_std,args.sensor_seed+seed)
+                        if args.sensor_noise else None))
             summary,log=run_mode(env,actor,critic,config,mode)
-            summary["seed"]=seed;records.append(summary);traces[mode]=log
+            summary["seed"]=seed
+            summary["sensor_noise_enabled"]=bool(args.sensor_noise)
+            summary["sensor_noise_seed"]=(args.sensor_seed+seed if args.sensor_noise else None)
+            records.append(summary);traces[mode]=log
             if args.save_data:
                 folder=args.output/f"seed_{seed}"/mode;folder.mkdir(parents=True)
                 log.to_csv(folder/"trajectory.csv",index=False)

@@ -125,24 +125,24 @@ def frozen_rollout(env,actor,critic,gamma,case_label):
     for _ in range(env.max_steps):
         import time
         loop_start=time.perf_counter()
-        initial_progress=float(obs.reference["projection"]["s"])
-        cte=float(obs.reference["projection"]["distance"])
-        heading=float(obs.error[2])
-        vx_err=float(obs.error[0])
+        initial_progress=float(obs.true_reference["projection"]["s"])
+        cte=float(obs.true_reference["projection"]["distance"])
+        heading=float(obs.true_error[2])
+        vx_err=float(obs.true_error[0])
         proposal=actor.propose(obs.features,deterministic=True)
         next_obs,reward,terminated,truncated,diag=env.step(
             proposal.q_diagonal,proposal.r_diagonal,critic,obs)
         row={
             "controller":case_label,
             "t_s":float((len(rows))*b.Ts),
-            "X_m":float(obs.physical[4]),
-            "Y_m":float(obs.physical[5]),
-            "X_ref_m":float(obs.reference["xref"][0][4]),
-            "Y_ref_m":float(obs.reference["xref"][0][5]),
+            "X_m":float(obs.true_physical[4]),
+            "Y_m":float(obs.true_physical[5]),
+            "X_ref_m":float(obs.true_reference["xref"][0][4]),
+            "Y_ref_m":float(obs.true_reference["xref"][0][5]),
             "s_progress_m":initial_progress,
             "cross_track_m":cte,
             "e_psi":heading,"e_vx":vx_err,
-            "reward":reward,
+            "reward":diag["reward_true"],
             **diag,
             "terminated":terminated,"truncated":truncated,
         }
