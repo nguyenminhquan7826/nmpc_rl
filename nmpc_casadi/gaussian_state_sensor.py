@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 STATE_NAMES = ("vx", "vy", "psi", "r", "X", "Y")
-EXAMPLE_STD = (0.005, 0.005, float(np.deg2rad(0.5)), 0.01, 0.005, 0.005)
+EXAMPLE_STD = (0.001, 0.001, float(np.deg2rad(0.1)), 0.002, 0.001, 0.001)
 
 
 class GaussianStateSensor:
