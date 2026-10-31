@@ -32,14 +32,21 @@ not PWM values. Confirm firmware's speed-PID/setpoint and servo calibration
 before enabling actuator output. Numerical model acceleration contains
 rolling/lateral terms; do not assume its first control equals measured dv/dt.
 
-## Interface pending confirmation
+## Confirmed interface and calibration
 
-Need firmware examples for RX/TX packet framing, baudrate, timestamp units,
-encoder count (cumulative/increment), IMU yaw/rate units and orientation,
-checksums, actuator command units/range, acknowledgements and watchdog.
-No existing wire protocol or servo/PWM calibration may be inferred from PDF.
-If no firmware protocol exists, define a versioned sample protocol and provide
-matching STM32 requirements before a connected actuation test.
+STM32 firmware commit 08516ddd29cdf0eb7c58e1a0f4e4339ed39f4f66:
+USART2 115200 8N1, TEL v1 CRC16-CCITT-FALSE telemetry every 20 ms;
+CMD,speed_mps,absolute_servo_degrees CRLF commands. Encoder samples 10 ms.
+Telemetry carries cumulative signed ticks, sensor timestamps/sequences and
+calibration/freshness flags. RX-only reader is implemented; TX is not.
+
+laas-bfmc step12-status-sync at 57f3fb6: servo center75, range45..105,
+relative travel +/-30deg -> bicycle steering +/-22.835397deg. Mapping is
+0.9666368131*phi - 0.0002282854502*phi^3 with angles in degrees.
+Wheelbase .250m; default IMU yaw convention clockwise positive.
+Acceleration-to-speed-PID mapping still needs implementation/validation.
+No command timeout/watchdog was found in the inspected STM32 receive loop;
+physical actuator enabling remains outside this RX-only milestone.
 
 ## Validation stages
 
