@@ -1,9 +1,9 @@
 # Pi 5 C++14 deployment components
 
 The telemetry receiver is RX-only: **no motor/servo commands are transmitted**.
-A separate native Fixed NMPC solver is available for offline numerical tests
-(see below). The solver is not connected to telemetry or actuators yet;
-Actor/Critic online adaptation has not yet been ported. It does not stop an already
+Native NMPC and online Actor/Critic cores are available with an offline
+four-mode numerical runner (see below). The controller is not connected to
+telemetry or actuators yet. It does not stop an already
 moving vehicle; test receiving with the vehicle stationary and drive disabled.
 No Python or CasADi runtime is needed for this receiver.
 
@@ -149,8 +149,8 @@ ctest --test-dir deployment_cpp14/build-native --output-on-failure
 FIXED_NMPC_PROBE="$PWD/deployment_cpp14/build-native/fixed_nmpc_probe" python3 deployment_cpp14/tests/test_fixed_nmpc.py
 ```
 
-CMake gets ABI settings from `casadi::casadi`. The parity suite is a separate
-Python command; CTest currently registers telemetry tests only. Leaving
+CMake gets ABI settings from `casadi::casadi`. The parity suites run as separate
+Python commands; CTest registers telemetry and online-lifecycle contract tests. Leaving
 `BUILD_FIXED_NMPC=OFF` preserves the CasADi-free receiver build.
 
 `fixed_nmpc_probe input.txt output.txt` accepts a versioned numeric fixture.
@@ -185,3 +185,122 @@ Solver diagnostics: `solver_status_code` is 0 accepted, 1 CasADi reported
 failure, 2 constraint violation above tolerance despite solver success,
 3 nonfinite objective, or 4 solver exception. Failed runs also print the
 CasADi return status/exception to stderr.
+
+
+## Four modes with native online adaptation
+
+The standard-library `online_ac` library implements the same 17-64-64 tanh
+Actor, eight Gaussian mean/sigma heads, squashed physical Q/R weights, analytic
+score-function backpropagation, output-specific factors, optional mu penalty
+and plain SGD as the Python evaluation code. The Critic is **six direct P
+coefficients**, not another neural network. Qf = diag(P); it updates by
+projected TD(0), with semi-gradient or sampled residual-gradient selected by
+configuration. No offline training driver is ported.
+
+| Mode | Q/R used | P/Qf used | Online update |
+| --- | --- | --- | --- |
+| fixed | exported fixed_q/fixed_r | separate fixed_qf | none |
+| actor_adapt | sampled Actor output | exported initial P held fixed | Actor only |
+| critic_adapt | deterministic Actor mean output | live P | Critic only |
+| full_adapt | sampled Actor output | live P | Actor and Critic |
+
+All runs receive independent copies of the same exported model. `initial_heads`
+retains learned W1/b1/W2/b2, resets both output heads to nominal Q/R and sigma,
+and resets P to initial_P. Thus the **nominal** starting weights match Fixed
+when fixed_Qf = initial_P; sampled Actor weights can differ from the first step.
+`trained` retains all learned parameters and P; its starting weights need not
+match Fixed. Export refuses trained Q/R bound changes that would remap learned
+physical outputs.
+
+Host export (NPZ is read without pickle):
+
+```bash
+python3 deployment_cpp14/tools/export_online_model.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output /tmp/controller.model --start initial_heads --horizon 20
+```
+
+Add `--config path/to/evaluation_config.json` to use a saved experiment's
+`checkpoint_config`, or a plain configuration JSON. The exporter does **not**
+import the evaluation driver or silently apply its editable LR/bound overrides.
+Without --config it uses checkpoint metadata. Change weights/bounds/LR in that
+explicit JSON, not inside the C++ source. `train_length_m` must be present.
+The .model.json sidecar records SHA256 provenance, selected start/schedule and
+source/effective settings. Never overwrite the source checkpoint. Numeric
+models use `AC_MODEL_V1`, row-major tensors, and finite validated fields.
+C++ runtime needs neither Python nor NPZ support.
+
+Native integration API:
+
+- `OnlineController::propose(features[, epsilon])` supplies Q/R and current P.
+- Supply these to a persistent `FixedNmpc(config, true)` via `set_step`, then
+  solve. Dynamic weight parameters avoid rebuilding the NLP for every step.
+- After applying a successful command and receiving the next state,
+  `observe(error, next_error, reward, terminated, truncated)` performs learning.
+  Reward is supplied by the environment; task Qe/Re remain separate from Q/R.
+- `cancel()` discards an unapplied proposal after a solver failure. An invalid
+  feedback/candidate update leaves model, pending buffers and counters intact.
+- Fixed feature scales match Python, including previous steering divided by
+  .55 even with a smaller hardware steering limit. Only heading **error** is
+  wrapped; physical heading must be continuous. Feature metadata carries
+  reference origin/initial heading, path progress, current/preview curvature
+  and the exported train length.
+
+For horizon=1, Actor uses the same pre-update TD as Critic on every transition.
+For horizon=20/full_horizon, hold Actor fixed while collecting **39 transitions**;
+then use 20 full 20-step targets and one mean batch gradient. The last 19
+transitions supply context only and are discarded after the update, exactly
+as in Python. Critic still updates every transition. All Actor targets in that
+block use its starting P snapshot. A true terminal event allows shorter
+returns; a truncation retains bootstrap and excludes insufficient horizons.
+`rollout_block` is also supported: collect horizon transitions, then use returns
+of decreasing lengths and one mean gradient. Neither design sums the batch
+loss into an implicit increase of LR.
+
+Seeded native sampling uses mt19937_64 and std::normal_distribution. It is
+repeatable on the same C++/standard-library implementation, but is **not**
+NumPy's PCG64 stream and is not promised bitwise across library versions.
+Supply explicit eight-dimensional epsilons to compare languages. The offline
+runner logs the actual epsilon, mu, sigma, latent, Q/R/P, TD and update sizes.
+Final `.model` files contain parameters only: they omit RNG and pending rollout
+buffers, so they are warm starts, not exact continuation checkpoints.
+
+### Run a no-hardware trial
+
+On Linux/WSL with the host dependencies above plus matplotlib:
+
+```bash
+python3 deployment_cpp14/tools/build_fixed_nmpc.py
+python3 deployment_cpp14/tools/run_offline_trial.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output native_trial_01 --steps 80 --seed 0 --horizon 20
+```
+
+Use a new output directory. Optionally pass --config as for export. This runs
+all four native C++ controllers with a short synthetic reference, native RK4
+plant and hardware geometry/limits; Python prepares the reference and plots.
+It writes trajectories.png, summary.csv, per-mode CSV/numeric diagnostics and
+final models. CTE is geometric distance from the simulated position to the
+provided polyline; task Qe/Re are illustrative fixed smoke-test settings.
+This trial validates execution, not superiority on your real test route.
+
+For custom numerical fixtures:
+`four_mode_probe model scenario output mode [seed]` reads AC_MODEL_V1 and
+AC_ROLLOUT_INPUT_V1; `run_offline_trial.py::prepare_case` defines the scenario.
+`reference_sequence` has steps+N+1 time-indexed states; feature metadata has one
+nine-vector per step. Optional `epsilon` contains steps*8 values; absent means
+native seeded sampling. Exit 2 and complete=0 mark an aborted solve; no learning
+or plant propagation occurs for the failed action. Partial logs remain usable.
+Reference projection/resampling from the real CAD route and sensor-driven
+feedback are not part of this synthetic harness.
+
+Run the parity suites after building:
+
+```bash
+python3 -m unittest discover -s deployment_cpp14/tests -p 'test_online*.py' -v
+python3 deployment_cpp14/tests/test_four_mode_rollout.py
+python3 deployment_cpp14/tests/test_fixed_nmpc.py
+deployment_cpp14/build/test_online_contract
+```
+
+For CMake-built executables set ACTOR_CRITIC_PROBE, ONLINE_CONTROLLER_PROBE,
+FOUR_MODE_PROBE and FIXED_NMPC_PROBE to their respective absolute paths before
+running Python tests. The contract test uses assertions even in Release.
+No Pi deadline, real sensor state observer, actuator mapping, UART control or
+real-vehicle validation is claimed by these tests.

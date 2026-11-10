@@ -25,3 +25,24 @@ if(BUILD_FIXED_NMPC)
   add_executable(fixed_nmpc_probe src/fixed_nmpc_probe.cpp)
   target_link_libraries(fixed_nmpc_probe PRIVATE fixed_nmpc)
 endif()
+
+# Standard-library online learning core can also be built without CasADi.
+add_library(online_ac src/online_ac.cpp src/online_controller.cpp)
+target_include_directories(online_ac PUBLIC include)
+target_compile_options(online_ac PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(actor_critic_probe src/actor_critic_probe.cpp)
+target_link_libraries(actor_critic_probe PRIVATE online_ac)
+add_executable(online_controller_probe src/online_controller_probe.cpp)
+target_link_libraries(online_controller_probe PRIVATE online_ac)
+if(BUILD_FIXED_NMPC)
+  # CasADi's GNU ABI selection must agree across linked C++ interfaces.
+  target_link_libraries(online_ac PUBLIC casadi::casadi)
+  add_executable(four_mode_probe src/four_mode_probe.cpp)
+  target_link_libraries(four_mode_probe PRIVATE fixed_nmpc online_ac)
+endif()
+add_executable(test_online_contract tests/test_online_contract.cpp)
+target_link_libraries(test_online_contract PRIVATE online_ac)
+# Assertion-based contract checks must remain enabled in Release builds.
+target_compile_options(test_online_contract PRIVATE -UNDEBUG)
+
+add_test(NAME online_contract COMMAND test_online_contract)
