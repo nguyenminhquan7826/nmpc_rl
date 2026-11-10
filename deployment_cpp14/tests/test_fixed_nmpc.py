@@ -7,7 +7,7 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'nmpc_casadi'))
 from nmpc_casadi import build_nmpc_solver,pack_parameters,shift_warm_start,unpack_solution
 from vehicle_model_casadi_variants import build_continuous_model,build_rk4_discrete_model
-EXE=Path(os.environ.get('FIXED_NMPC_PROBE',str(ROOT/'deployment_cpp14/build/fixed_nmpc_probe')))
+EXE=Path(os.environ.get('FIXED_NMPC_PROBE',str(ROOT/'build/fixed_nmpc_probe' if (ROOT/'build/fixed_nmpc_probe').is_file() else ROOT/'deployment_cpp14/build/fixed_nmpc_probe')))
 
 
 def fixture(hardware=True,N=10,wrap=False,infeasible=False):
@@ -76,6 +76,19 @@ class ParityTests(unittest.TestCase):
                 np.testing.assert_allclose(out['control'],U[:,0],rtol=1e-6,atol=1e-7)
                 np.testing.assert_allclose(out['shifted'],shift_warm_start(X,U),rtol=1e-6,atol=1e-7)
                 print('PARITY',hardware,N,wrap,'control_maxerr',np.max(np.abs(out['control']-U[:,0])))
+
+    def test_dynamic_weight_fixture_parameters(self):
+        d,c,fd=fixture();d['dynamic_weights']=[1]
+        out=self.run_case(d)
+        par=pack_parameters(d['state'],d['previous'],d['reference'].reshape(11,6),d['model'],weights=(d['q'],d['r'],d['qf']))
+        np.testing.assert_array_equal(out['parameters'],par)
+
+    def test_constraint_jacobian_operation_order(self):
+        d,c,fd=fixture();d['dynamic_weights']=[1];out=self.run_case(d)
+        py=build_nmpc_solver(fd,10,np.diag(d['q']),np.diag(d['r']),np.diag(d['qf']),c,adaptive_cost_weights=True)
+        par=pack_parameters(d['state'],d['previous'],d['reference'].reshape(11,6),d['model'],weights=(d['q'],d['r'],d['qf']))
+        _,_,_,jac=py['solver'].get_function('nlp_jac_fg')(d['guess'],par)
+        np.testing.assert_array_equal(out['eval_jacobian'],np.asarray(jac).ravel(order='F'))
 
     def test_receding_horizon_warm_start(self):
         d,c,fd=fixture()

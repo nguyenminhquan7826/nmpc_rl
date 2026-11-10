@@ -348,3 +348,86 @@ FOUR_MODE_PROBE and FIXED_NMPC_PROBE to their respective absolute paths before
 running Python tests. The contract test uses assertions even in Release.
 No Pi deadline, real sensor state observer, actuator mapping, UART control or
 real-vehicle validation is claimed by these tests.
+
+## Real CSV route: full Python/C++ comparison
+
+Build from the repository root; `reference_probe` and `route_controller` are now
+included in `build/`:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+python3 deployment_cpp14/tests/test_reference_path.py
+python3 deployment_cpp14/tests/test_route_controller.py
+```
+
+Run both languages on your actual evaluation CSV and checkpoint:
+
+```bash
+python3 deployment_cpp14/tools/compare_route.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --config nmpc_casadi/evaluation_four_modes_5/evaluation_config.json --reference nmpc_casadi/test_reference/test_xref.csv --output route_comparison_01 --max-steps 2500 --horizon 20 --seed 0
+```
+
+Replace checkpoint/config paths with your files. Omit --config to use checkpoint
+metadata as exported; it does not silently apply editable Python evaluation
+settings. The comparison uses the existing Python TrainEnvironment,
+adaptive_rollout and frozen_rollout, without editing those modules. C++ reads
+the **original CSV independently**; Python-generated horizons are never fed to
+it. The run checks that source reference bytes stay unchanged during evaluation.
+
+Native route handling implements the ten-column CAD validation, heading unwrap,
+0.20 m horizon-only tail, local segment search (0.15 m back, 1.2 m ahead),
+monotonic progress, interpolation, midpoint horizon and geometric CTE. The
+runtime uses legacy Python geometry/constraints (.2515 m, +/- .55 rad) for this
+comparison, not an implicit switch to the calibrated hardware limits.
+
+The initial normal/heading offsets, feedforward RK4 guess, rate-limited fresh
+retry guess, two SQP attempts, held previous control after both fail, three-fail
+termination and final .03 m progress margin match the Python simulation. A
+failed retry does not overwrite the warm start. **This hold-and-learn fallback
+belongs to simulation parity, not an implemented hardware failure policy.**
+It differs intentionally from the earlier short synthetic probe's abort policy.
+Fixed preserves simultaneous completion/failure flags if the third held step
+crosses the goal threshold. Adaptive mode rejects that combination as the
+original Python compute_training_reward helper does. Native exit codes are
+0 reached, 2 failure-terminal (takes priority over reached), 3 truncated, and
+1 invalid input/I/O/runtime error; inspect the saved flags too.
+
+One saved epsilon tape is used by both languages, shared by control-step index
+across modes. Task Qe/Re and optional learning-only failure penalties come from
+the explicit exported configuration. --feature-scale route (default) matches
+what the existing evaluator actually passes as train_length_m: the current
+map length. --feature-scale train uses the checkpoint's training length in BOTH
+languages; this changes the experiment and is recorded, not silently selected.
+
+Outputs:
+
+- trajectories.png, cte_mean_max.png, full_adapt_weights.png: native results.
+- python_cpp_overlay.png: both languages plotted together for each mode.
+- MODE_python.csv and MODE_cpp.csv: per-step states, weights, CTE, rewards,
+  solver status, features and updates; the final post-action point is retained.
+- MODE_cpp.csv.model and .summary: final native parameters and metrics.
+- initial.model + provenance JSON, epsilon.npy, settings.txt, manifest.json:
+  shared model/settings and checkpoint/reference/config/binary SHA256 hashes.
+- parity.json: per-field errors, final tensor comparisons, status/count checks.
+- MODE_solver_replays/: failed Python NLP inputs, native replays and diagnostic
+  evaluations, when the sibling fixed_nmpc_probe executable is available. The
+  native probe accepts dynamic_weights=1 for these exact solver requests.
+
+Default tolerances are atol=1e-7, rtol=1e-6 and are saved in parity.json. A
+comparison exits **4** if any strict parity check differs; this preserves all
+results and plots, rather than treating the run as a successful match.
+`trajectory_pass` excludes only differences in primary/retry selection;
+`pass` still checks those discrete diagnostics. End-of-run failure/truncation,
+step count and applied controls remain part of trajectory checks. A stopped
+run is marked incomplete on plots and cannot be compared as a completed lap.
+
+On the recorded three-seed test, Fixed/Critic/Full match in all seeds and Actor
+matches fully in seed 1. Actor seed 2 matches trajectory/weights but retry
+selection differs; Actor seed 0 fails in both languages at slightly different
+steps. Saved failed-input replays match numerically and in failure status.
+Do not claim all four modes have unconditional full-route parity or stable
+learning based only on the small fixture tests. See the detailed verification
+record in docs/superpowers/plans/2026-11-10-route-cpp-verification.md.
+
+Gaussian sensor noise, STM32 emulation and hardware actuation are subsequent
+milestones; this comparison uses clean simulated state feedback.

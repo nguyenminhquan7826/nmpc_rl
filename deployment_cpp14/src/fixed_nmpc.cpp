@@ -65,7 +65,9 @@ FixedNmpc::FixedNmpc(const Values &input, bool dynamic_weights)
   SX x = SX::sym("x", 6), u = SX::sym("u", 2), p = SX::sym("model", 9);
   SX vx = x(0), vy = x(1), psi = x(2), rate = x(3), delta = u(1);
   SX safe = sqrt(vx * vx + p(8) * p(8));
-  SX fyf = p(2) * (delta - (vy + p(4) * rate) / safe), fyr = -p(3) * (vy - p(5) * rate) / safe;
+  // Keep theta_r division inside the product, as in Python: AD roundoff matters
+  // when the SQP subproblem is near a numerical singularity.
+  SX fyf = p(2) * (delta - (vy + p(4) * rate) / safe), fyr = -p(3) * ((vy - p(5) * rate) / safe);
   SX rhs = SX::vertcat({u(0) - fyf / p(0) * sin(delta) - p(6) * p(7) + vy * rate,
                         (fyr + fyf * cos(delta)) / p(0) - vx * rate, rate,
                         (p(4) * fyf * cos(delta) - p(5) * fyr) / p(1),

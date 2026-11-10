@@ -11,7 +11,7 @@ sys.path.insert(0,str(ROOT/'nmpc_casadi'))
 from gaussian_weight_actor import GaussianWeightActor,build_actor_observation
 from direct_p_critic import SixParameterTDCritic
 from nstep_actor import block_advantages,full_horizon_advantages
-EXE=Path(os.environ.get('ACTOR_CRITIC_PROBE',str(ROOT/'deployment_cpp14/build/actor_critic_probe')))
+EXE=Path(os.environ.get('ACTOR_CRITIC_PROBE',str(ROOT/'build/actor_critic_probe' if (ROOT/'build/actor_critic_probe').is_file() else ROOT/'deployment_cpp14/build/actor_critic_probe')))
 PARAMS={'W1':(17,64),'b1':(64,),'W2':(64,64),'b2':(64,),
         'W_mu':(64,8),'b_mu':(8,),'W_sigma':(64,8),'b_sigma':(8,)}
 

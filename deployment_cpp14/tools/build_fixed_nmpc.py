@@ -23,3 +23,9 @@ print('Built Fixed NMPC, Actor/Critic math, controller and four-mode offline pro
 
 subprocess.run(common+[str(root/'src'/s) for s in ['online_ac.cpp','online_controller.cpp']]+[str(root/'tests/test_online_contract.cpp'),'-o',str(build/'test_online_contract')],check=True)
 subprocess.run([str(build/'test_online_contract')],check=True)
+
+subprocess.run(common+[str(root/'src'/s) for s in ['reference_path.cpp','reference_probe.cpp']]+['-o',str(build/'reference_probe')],check=True)
+subprocess.run(common+['-D_GLIBCXX_USE_CXX11_ABI=0','-isystem',str(wheel/'include')]+
+    [str(root/'src'/s) for s in ['fixed_nmpc.cpp','online_ac.cpp','online_controller.cpp','reference_path.cpp','route_controller.cpp']]+
+    ['-L'+str(wheel),'-Wl,-rpath,'+str(wheel),'-lcasadi','-o',str(build/'route_controller')],check=True)
+print('Built native reference/route controllers')

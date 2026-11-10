@@ -11,7 +11,7 @@ from actor_critic_updates import learn_one_transition
 from nstep_actor import full_horizon_advantages,block_advantages,update_actor_block
 from direct_p_critic import error_from_state
 from rl_paper_core import paper_reward
-EXE=Path(os.environ.get('FOUR_MODE_PROBE',str(ROOT/'deployment_cpp14/build/four_mode_probe')))
+EXE=Path(os.environ.get('FOUR_MODE_PROBE',str(ROOT/'build/four_mode_probe' if (ROOT/'build/four_mode_probe').is_file() else ROOT/'deployment_cpp14/build/four_mode_probe')))
 MODES=('fixed','actor_adapt','critic_adapt','full_adapt')
 
 def scenario(n=12):

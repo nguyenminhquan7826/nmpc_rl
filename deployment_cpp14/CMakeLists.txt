@@ -70,3 +70,15 @@ target_link_libraries(test_online_contract PRIVATE online_ac)
 target_compile_options(test_online_contract PRIVATE -UNDEBUG)
 
 add_test(NAME online_contract COMMAND test_online_contract)
+
+add_library(reference_path src/reference_path.cpp)
+target_include_directories(reference_path PUBLIC include)
+target_compile_options(reference_path PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(reference_probe src/reference_probe.cpp)
+target_link_libraries(reference_probe PRIVATE reference_path)
+if(BUILD_FIXED_NMPC)
+  # Reference vectors crossing the solver boundary must use CasADi's C++ ABI.
+  target_link_libraries(reference_path PUBLIC casadi::casadi)
+  add_executable(route_controller src/route_controller.cpp)
+  target_link_libraries(route_controller PRIVATE fixed_nmpc online_ac reference_path)
+endif()

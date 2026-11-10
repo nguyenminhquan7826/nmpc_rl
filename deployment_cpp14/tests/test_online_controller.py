@@ -5,7 +5,7 @@ import numpy as np
 from test_online_ac import ROOT,PARAMS,model_fixture,write_values,read_values
 from actor_critic_updates import learn_one_transition
 from nstep_actor import block_advantages,full_horizon_advantages,update_actor_block
-EXE=Path(os.environ.get('ONLINE_CONTROLLER_PROBE',str(ROOT/'deployment_cpp14/build/online_controller_probe')))
+EXE=Path(os.environ.get('ONLINE_CONTROLLER_PROBE',str(ROOT/'build/online_controller_probe' if (ROOT/'build/online_controller_probe').is_file() else ROOT/'deployment_cpp14/build/online_controller_probe')))
 EXPORT=ROOT/'deployment_cpp14/tools/export_online_model.py'
 
 def reference_sequence(actor,critic,d,mode,obs,eps,errors,en,rewards,terminal,horizon,design):
