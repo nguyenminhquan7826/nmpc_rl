@@ -17,7 +17,31 @@ add_test(NAME telemetry_contract COMMAND test_telemetry)
 # Receiver remains dependency-free; enable the native solver explicitly.
 option(BUILD_FIXED_NMPC "Build offline Fixed NMPC parity probe (CasADi required)" OFF)
 if(BUILD_FIXED_NMPC)
-  find_package(casadi 3.7.2 CONFIG REQUIRED)
+  find_package(casadi 3.7.2 CONFIG QUIET)
+  if(NOT casadi_FOUND)
+    # Optional configure-time discovery of a Python wheel's native SDK.
+    # An explicit -Dcasadi_DIR or CMAKE_PREFIX_PATH is tried first above.
+    find_program(NMPC_CASADI_PYTHON NAMES python3 python)
+    if(NMPC_CASADI_PYTHON)
+      execute_process(
+        COMMAND "${NMPC_CASADI_PYTHON}" -c
+          "import pathlib, casadi; print(pathlib.Path(casadi.__file__).parent / 'cmake')"
+        RESULT_VARIABLE wheel_result
+        OUTPUT_VARIABLE wheel_cmake_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+      if(wheel_result EQUAL 0 AND EXISTS "${wheel_cmake_dir}/casadi-config.cmake")
+        find_package(casadi 3.7.2 CONFIG QUIET PATHS "${wheel_cmake_dir}" NO_DEFAULT_PATH)
+      endif()
+    endif()
+  endif()
+  if(NOT casadi_FOUND)
+    message(FATAL_ERROR
+      "CasADi 3.7.2 C++ SDK not found. Set -Dcasadi_DIR=/path/to/casadi/cmake, "
+      "or install casadi==3.7.2 for Python and select that interpreter with "
+      "-DNMPC_CASADI_PYTHON=/path/to/python. "
+      "Use -DBUILD_FIXED_NMPC=OFF for telemetry/online-learning core only.")
+  endif()
   add_library(fixed_nmpc src/fixed_nmpc.cpp)
   target_include_directories(fixed_nmpc PUBLIC include)
   target_link_libraries(fixed_nmpc PUBLIC casadi::casadi)

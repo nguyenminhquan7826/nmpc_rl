@@ -7,6 +7,50 @@ telemetry or actuators yet. It does not stop an already
 moving vehicle; test receiving with the vehicle stationary and drive disabled.
 No Python or CasADi runtime is needed for this receiver.
 
+## Build all native programs with CMake
+
+From the **repository root**, on Raspberry Pi OS/Linux/WSL:
+
+```bash
+python3 -m pip install casadi==3.7.2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+Install a C++14 compiler and CMake >=3.16 first (on Debian/Ubuntu/Pi OS,
+`sudo apt install build-essential cmake`). CMake first searches for an installed
+CasADi C++ SDK, then optionally discovers the native SDK in your Python wheel.
+If using a virtual environment, activate it before configuring, or select its
+interpreter with `-DNMPC_CASADI_PYTHON=/path/to/venv/bin/python`. For a separate
+native SDK, pass `-Dcasadi_DIR=/path/to/casadi/cmake`. The SDK/libraries must match
+the machine's architecture; x86 libraries cannot run on Pi aarch64.
+
+Executables go directly inside `build/`:
+
+```
+build/
+  telemetry_rx
+  fixed_nmpc_probe
+  actor_critic_probe
+  online_controller_probe
+  four_mode_probe
+  test_telemetry
+  test_online_contract
+```
+
+The repository-root CMake enables the NMPC/four-mode targets by default.
+`-DBUILD_FIXED_NMPC=OFF` builds telemetry and the online-learning core without
+CasADi. Existing `cmake -S deployment_cpp14 -B ...` usage is retained, with its
+previous dependency-free default. Out-of-source build directories are created
+by CMake automatically. The standard Linux executables have no `.exe` suffix.
+
+Use the root-built runner explicitly for a trial:
+
+```bash
+python3 deployment_cpp14/tools/run_offline_trial.py --binary build/four_mode_probe --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output native_trial_01 --steps 80 --seed 0 --horizon 20
+```
+
 ## Build on Raspberry Pi OS (Linux)
 
 From the repository root:

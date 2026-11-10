@@ -64,7 +64,7 @@ def summarize(mode,out,reference,folder):
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--checkpoint',type=Path,required=True);ap.add_argument('--config',type=Path);ap.add_argument('--output',type=Path,required=True)
     ap.add_argument('--steps',type=int,default=80);ap.add_argument('--seed',type=int,default=0);ap.add_argument('--horizon',type=int,default=20)
-    ap.add_argument('--start',choices=('initial_heads','trained'),default='initial_heads');ap.add_argument('--binary',type=Path,default=ROOT/'deployment_cpp14/build/four_mode_probe');args=ap.parse_args()
+    ap.add_argument('--start',choices=('initial_heads','trained'),default='initial_heads');ap.add_argument('--binary',type=Path,default=(ROOT/'build/four_mode_probe' if (ROOT/'build/four_mode_probe').is_file() else ROOT/'deployment_cpp14/build/four_mode_probe'));args=ap.parse_args()
     if args.steps<1 or args.steps>10000 or not 0<=args.seed<2**64:ap.error('Invalid steps/seed')
     if not args.binary.is_file():ap.error('Build four_mode_probe first')
     if args.output.exists():ap.error('Use a new output directory')
