@@ -1,7 +1,9 @@
-# Pi 5 C++14 telemetry receiver and encoder–IMU odometry
+# Pi 5 C++14 deployment components
 
-This milestone is RX-only: **no motor/servo commands are transmitted**. It is
-not yet a C++ NMPC or Actor–Critic controller. It does not stop an already
+The telemetry receiver is RX-only: **no motor/servo commands are transmitted**.
+A separate native Fixed NMPC solver is available for offline numerical tests
+(see below). The solver is not connected to telemetry or actuators yet;
+Actor/Critic online adaptation has not yet been ported. It does not stop an already
 moving vehicle; test receiving with the vehicle stationary and drive disabled.
 No Python or CasADi runtime is needed for this receiver.
 
@@ -110,3 +112,76 @@ PTY integration verifies fragmented serial frames, raw capture, corrupt and
 oversized lines, packet loss, replay, and absence of transmitted commands.
 No physical Pi/STM32 test or on-device timing claim has been made. The provided
 CMake file is optional; the host checks used direct g++ compilation.
+
+
+## Native Fixed NMPC: offline Python/C++ parity
+
+The C++14 library independently constructs the bicycle model, RK4 integrator,
+multiple-shooting objective and constraints using CasADi C++. It does not load
+a Python-exported solver. State order is `vx,vy,psi,r,X,Y`; input is
+`acceleration_mps2,wheel_steering_rad`. R penalizes input **increments**.
+Predicted states 1 through N-1 use Q; state N uses Qf. Heading error is wrapped.
+The output acceleration is not a motor speed setpoint; there is no actuator
+adapter in this milestone.
+
+Host prerequisites: Linux, g++, Python with NumPy and **CasADi 3.7.2**.
+From the repository root:
+
+```bash
+python3 deployment_cpp14/tools/build_fixed_nmpc.py
+python3 deployment_cpp14/tests/test_fixed_nmpc.py
+```
+
+The helper links the Linux CasADi Python wheel's C++ headers/libraries with
+`_GLIBCXX_USE_CXX11_ABI=0`, matching that wheel's GNU CMake configuration.
+Python is only used to build and verify on the host; the executable itself
+uses native CasADi shared libraries, including SQP/QRQP plugins. Keep the wheel
+library directory available (the helper sets its rpath). This helper is not a
+cross-compiler and does not produce a Pi binary on an x86 workstation.
+
+For a native Pi build, install **aarch64 CasADi 3.7.2 C++ libraries/headers**
+with SQP/QRQP and an ABI compatible with your compiler, then enable the target:
+
+```bash
+cmake -S deployment_cpp14 -B deployment_cpp14/build-native -DBUILD_FIXED_NMPC=ON -DCMAKE_BUILD_TYPE=Release -Dcasadi_DIR=/path/to/casadi/cmake
+cmake --build deployment_cpp14/build-native -j2
+ctest --test-dir deployment_cpp14/build-native --output-on-failure
+FIXED_NMPC_PROBE="$PWD/deployment_cpp14/build-native/fixed_nmpc_probe" python3 deployment_cpp14/tests/test_fixed_nmpc.py
+```
+
+CMake gets ABI settings from `casadi::casadi`. The parity suite is a separate
+Python command; CTest currently registers telemetry tests only. Leaving
+`BUILD_FIXED_NMPC=OFF` preserves the CasADi-free receiver build.
+
+`fixed_nmpc_probe input.txt output.txt` accepts a versioned numeric fixture.
+`tests/test_fixed_nmpc.py::fixture` and `write_input` define the complete input:
+`FIXED_NMPC_V1`, then lines `key count values...`. All physical values use SI
+units. References are N+1 consecutive six-vectors; guesses contain N consecutive
+six-state vectors followed by N two-input vectors. State bounds may be infinite;
+states, references, inputs and model parameters must be finite. Weights must
+be positive. The configured beta and lateral-speed limits are required.
+Output uses `FIXED_NMPC_RESULT_V1` and the same key/count format. Dense Jacobians
+are flattened column-major. Configuration is validated before constructing the
+solver or opening the output file.
+
+Exit status is 0 for a successful solve with finite objective and maximum
+constraint/variable violation <=1e-6; 2 for a failed/infeasible solve; 1 for an
+invalid file/configuration or I/O error. `control` and `shifted` are empty on
+solve failure: never treat a failed solution as a newly valid command. Output
+may contain a failed candidate `solution` for diagnostics only. This is a
+numerical test tool, not a real-time controller or hardware failure policy.
+
+Verification covers legacy parameters (.2515 m wheelbase, +/- .55 rad) and
+hardware parameters (.250 m, +/-22.835397 degrees), always using identical
+settings in Python and C++. It compares RK4, packed parameters, cost, objective
+gradient, constraints, dense Jacobian, solved trajectory, first command and
+shifted warm start, including +/-pi heading and N=1. A 20-step receding-horizon
+case exercises straight/curved references and reused warm starts. Negative
+tests reject malformed/nonfinite states, invalid horizon/Ts/weights and ensure
+an infeasible problem produces no new control. These are parity checks, not
+proof of stability, sensor estimation accuracy or Pi deadline performance.
+
+Solver diagnostics: `solver_status_code` is 0 accepted, 1 CasADi reported
+failure, 2 constraint violation above tolerance despite solver success,
+3 nonfinite objective, or 4 solver exception. Failed runs also print the
+CasADi return status/exception to stderr.
