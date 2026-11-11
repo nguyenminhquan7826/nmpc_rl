@@ -17,3 +17,6 @@ env/
 /nmpc_casadi/*.png
 *.log
 # Keep external research documents and artifacts private/local
+
+# Native out-of-source CMake build
+/build/

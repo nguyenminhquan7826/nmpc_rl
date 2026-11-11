@@ -1,9 +1,55 @@
-# Pi 5 C++14 telemetry receiver and encoder–IMU odometry
+# Pi 5 C++14 deployment components
 
-This milestone is RX-only: **no motor/servo commands are transmitted**. It is
-not yet a C++ NMPC or Actor–Critic controller. It does not stop an already
+The telemetry receiver is RX-only: **no motor/servo commands are transmitted**.
+Native NMPC and online Actor/Critic cores are available with an offline
+four-mode numerical runner (see below). The controller is not connected to
+telemetry or actuators yet. It does not stop an already
 moving vehicle; test receiving with the vehicle stationary and drive disabled.
 No Python or CasADi runtime is needed for this receiver.
+
+## Build all native programs with CMake
+
+From the **repository root**, on Raspberry Pi OS/Linux/WSL:
+
+```bash
+python3 -m pip install casadi==3.7.2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+Install a C++14 compiler and CMake >=3.16 first (on Debian/Ubuntu/Pi OS,
+`sudo apt install build-essential cmake`). CMake first searches for an installed
+CasADi C++ SDK, then optionally discovers the native SDK in your Python wheel.
+If using a virtual environment, activate it before configuring, or select its
+interpreter with `-DNMPC_CASADI_PYTHON=/path/to/venv/bin/python`. For a separate
+native SDK, pass `-Dcasadi_DIR=/path/to/casadi/cmake`. The SDK/libraries must match
+the machine's architecture; x86 libraries cannot run on Pi aarch64.
+
+Executables go directly inside `build/`:
+
+```
+build/
+  telemetry_rx
+  fixed_nmpc_probe
+  actor_critic_probe
+  online_controller_probe
+  four_mode_probe
+  test_telemetry
+  test_online_contract
+```
+
+The repository-root CMake enables the NMPC/four-mode targets by default.
+`-DBUILD_FIXED_NMPC=OFF` builds telemetry and the online-learning core without
+CasADi. Existing `cmake -S deployment_cpp14 -B ...` usage is retained, with its
+previous dependency-free default. Out-of-source build directories are created
+by CMake automatically. The standard Linux executables have no `.exe` suffix.
+
+Use the root-built runner explicitly for a trial:
+
+```bash
+python3 deployment_cpp14/tools/run_offline_trial.py --binary build/four_mode_probe --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output native_trial_01 --steps 80 --seed 0 --horizon 20
+```
 
 ## Build on Raspberry Pi OS (Linux)
 
@@ -110,3 +156,278 @@ PTY integration verifies fragmented serial frames, raw capture, corrupt and
 oversized lines, packet loss, replay, and absence of transmitted commands.
 No physical Pi/STM32 test or on-device timing claim has been made. The provided
 CMake file is optional; the host checks used direct g++ compilation.
+
+
+## Native Fixed NMPC: offline Python/C++ parity
+
+The C++14 library independently constructs the bicycle model, RK4 integrator,
+multiple-shooting objective and constraints using CasADi C++. It does not load
+a Python-exported solver. State order is `vx,vy,psi,r,X,Y`; input is
+`acceleration_mps2,wheel_steering_rad`. R penalizes input **increments**.
+Predicted states 1 through N-1 use Q; state N uses Qf. Heading error is wrapped.
+The output acceleration is not a motor speed setpoint; there is no actuator
+adapter in this milestone.
+
+Host prerequisites: Linux, g++, Python with NumPy and **CasADi 3.7.2**.
+From the repository root:
+
+```bash
+python3 deployment_cpp14/tools/build_fixed_nmpc.py
+python3 deployment_cpp14/tests/test_fixed_nmpc.py
+```
+
+The helper links the Linux CasADi Python wheel's C++ headers/libraries with
+`_GLIBCXX_USE_CXX11_ABI=0`, matching that wheel's GNU CMake configuration.
+Python is only used to build and verify on the host; the executable itself
+uses native CasADi shared libraries, including SQP/QRQP plugins. Keep the wheel
+library directory available (the helper sets its rpath). This helper is not a
+cross-compiler and does not produce a Pi binary on an x86 workstation.
+
+For a native Pi build, install **aarch64 CasADi 3.7.2 C++ libraries/headers**
+with SQP/QRQP and an ABI compatible with your compiler, then enable the target:
+
+```bash
+cmake -S deployment_cpp14 -B deployment_cpp14/build-native -DBUILD_FIXED_NMPC=ON -DCMAKE_BUILD_TYPE=Release -Dcasadi_DIR=/path/to/casadi/cmake
+cmake --build deployment_cpp14/build-native -j2
+ctest --test-dir deployment_cpp14/build-native --output-on-failure
+FIXED_NMPC_PROBE="$PWD/deployment_cpp14/build-native/fixed_nmpc_probe" python3 deployment_cpp14/tests/test_fixed_nmpc.py
+```
+
+CMake gets ABI settings from `casadi::casadi`. The parity suites run as separate
+Python commands; CTest registers telemetry and online-lifecycle contract tests. Leaving
+`BUILD_FIXED_NMPC=OFF` preserves the CasADi-free receiver build.
+
+`fixed_nmpc_probe input.txt output.txt` accepts a versioned numeric fixture.
+`tests/test_fixed_nmpc.py::fixture` and `write_input` define the complete input:
+`FIXED_NMPC_V1`, then lines `key count values...`. All physical values use SI
+units. References are N+1 consecutive six-vectors; guesses contain N consecutive
+six-state vectors followed by N two-input vectors. State bounds may be infinite;
+states, references, inputs and model parameters must be finite. Weights must
+be positive. The configured beta and lateral-speed limits are required.
+Output uses `FIXED_NMPC_RESULT_V1` and the same key/count format. Dense Jacobians
+are flattened column-major. Configuration is validated before constructing the
+solver or opening the output file.
+
+Exit status is 0 for a successful solve with finite objective and maximum
+constraint/variable violation <=1e-6; 2 for a failed/infeasible solve; 1 for an
+invalid file/configuration or I/O error. `control` and `shifted` are empty on
+solve failure: never treat a failed solution as a newly valid command. Output
+may contain a failed candidate `solution` for diagnostics only. This is a
+numerical test tool, not a real-time controller or hardware failure policy.
+
+Verification covers legacy parameters (.2515 m wheelbase, +/- .55 rad) and
+hardware parameters (.250 m, +/-22.835397 degrees), always using identical
+settings in Python and C++. It compares RK4, packed parameters, cost, objective
+gradient, constraints, dense Jacobian, solved trajectory, first command and
+shifted warm start, including +/-pi heading and N=1. A 20-step receding-horizon
+case exercises straight/curved references and reused warm starts. Negative
+tests reject malformed/nonfinite states, invalid horizon/Ts/weights and ensure
+an infeasible problem produces no new control. These are parity checks, not
+proof of stability, sensor estimation accuracy or Pi deadline performance.
+
+Solver diagnostics: `solver_status_code` is 0 accepted, 1 CasADi reported
+failure, 2 constraint violation above tolerance despite solver success,
+3 nonfinite objective, or 4 solver exception. Failed runs also print the
+CasADi return status/exception to stderr.
+
+
+## Four modes with native online adaptation
+
+The standard-library `online_ac` library implements the same 17-64-64 tanh
+Actor, eight Gaussian mean/sigma heads, squashed physical Q/R weights, analytic
+score-function backpropagation, output-specific factors, optional mu penalty
+and plain SGD as the Python evaluation code. The Critic is **six direct P
+coefficients**, not another neural network. Qf = diag(P); it updates by
+projected TD(0), with semi-gradient or sampled residual-gradient selected by
+configuration. No offline training driver is ported.
+
+| Mode | Q/R used | P/Qf used | Online update |
+| --- | --- | --- | --- |
+| fixed | exported fixed_q/fixed_r | separate fixed_qf | none |
+| actor_adapt | sampled Actor output | exported initial P held fixed | Actor only |
+| critic_adapt | deterministic Actor mean output | live P | Critic only |
+| full_adapt | sampled Actor output | live P | Actor and Critic |
+
+All runs receive independent copies of the same exported model. `initial_heads`
+retains learned W1/b1/W2/b2, resets both output heads to nominal Q/R and sigma,
+and resets P to initial_P. Thus the **nominal** starting weights match Fixed
+when fixed_Qf = initial_P; sampled Actor weights can differ from the first step.
+`trained` retains all learned parameters and P; its starting weights need not
+match Fixed. Export refuses trained Q/R bound changes that would remap learned
+physical outputs.
+
+Host export (NPZ is read without pickle):
+
+```bash
+python3 deployment_cpp14/tools/export_online_model.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output /tmp/controller.model --start initial_heads --horizon 20
+```
+
+Add `--config path/to/evaluation_config.json` to use a saved experiment's
+`checkpoint_config`, or a plain configuration JSON. The exporter does **not**
+import the evaluation driver or silently apply its editable LR/bound overrides.
+Without --config it uses checkpoint metadata. Change weights/bounds/LR in that
+explicit JSON, not inside the C++ source. `train_length_m` must be present.
+The .model.json sidecar records SHA256 provenance, selected start/schedule and
+source/effective settings. Never overwrite the source checkpoint. Numeric
+models use `AC_MODEL_V1`, row-major tensors, and finite validated fields.
+C++ runtime needs neither Python nor NPZ support.
+
+Native integration API:
+
+- `OnlineController::propose(features[, epsilon])` supplies Q/R and current P.
+- Supply these to a persistent `FixedNmpc(config, true)` via `set_step`, then
+  solve. Dynamic weight parameters avoid rebuilding the NLP for every step.
+- After applying a successful command and receiving the next state,
+  `observe(error, next_error, reward, terminated, truncated)` performs learning.
+  Reward is supplied by the environment; task Qe/Re remain separate from Q/R.
+- `cancel()` discards an unapplied proposal after a solver failure. An invalid
+  feedback/candidate update leaves model, pending buffers and counters intact.
+- Fixed feature scales match Python, including previous steering divided by
+  .55 even with a smaller hardware steering limit. Only heading **error** is
+  wrapped; physical heading must be continuous. Feature metadata carries
+  reference origin/initial heading, path progress, current/preview curvature
+  and the exported train length.
+
+For horizon=1, Actor uses the same pre-update TD as Critic on every transition.
+For horizon=20/full_horizon, hold Actor fixed while collecting **39 transitions**;
+then use 20 full 20-step targets and one mean batch gradient. The last 19
+transitions supply context only and are discarded after the update, exactly
+as in Python. Critic still updates every transition. All Actor targets in that
+block use its starting P snapshot. A true terminal event allows shorter
+returns; a truncation retains bootstrap and excludes insufficient horizons.
+`rollout_block` is also supported: collect horizon transitions, then use returns
+of decreasing lengths and one mean gradient. Neither design sums the batch
+loss into an implicit increase of LR.
+
+Seeded native sampling uses mt19937_64 and std::normal_distribution. It is
+repeatable on the same C++/standard-library implementation, but is **not**
+NumPy's PCG64 stream and is not promised bitwise across library versions.
+Supply explicit eight-dimensional epsilons to compare languages. The offline
+runner logs the actual epsilon, mu, sigma, latent, Q/R/P, TD and update sizes.
+Final `.model` files contain parameters only: they omit RNG and pending rollout
+buffers, so they are warm starts, not exact continuation checkpoints.
+
+### Run a no-hardware trial
+
+On Linux/WSL with the host dependencies above plus matplotlib:
+
+```bash
+python3 deployment_cpp14/tools/build_fixed_nmpc.py
+python3 deployment_cpp14/tools/run_offline_trial.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --output native_trial_01 --steps 80 --seed 0 --horizon 20
+```
+
+Use a new output directory. Optionally pass --config as for export. This runs
+all four native C++ controllers with a short synthetic reference, native RK4
+plant and hardware geometry/limits; Python prepares the reference and plots.
+It writes trajectories.png, summary.csv, per-mode CSV/numeric diagnostics and
+final models. CTE is geometric distance from the simulated position to the
+provided polyline; task Qe/Re are illustrative fixed smoke-test settings.
+This trial validates execution, not superiority on your real test route.
+
+For custom numerical fixtures:
+`four_mode_probe model scenario output mode [seed]` reads AC_MODEL_V1 and
+AC_ROLLOUT_INPUT_V1; `run_offline_trial.py::prepare_case` defines the scenario.
+`reference_sequence` has steps+N+1 time-indexed states; feature metadata has one
+nine-vector per step. Optional `epsilon` contains steps*8 values; absent means
+native seeded sampling. Exit 2 and complete=0 mark an aborted solve; no learning
+or plant propagation occurs for the failed action. Partial logs remain usable.
+Reference projection/resampling from the real CAD route and sensor-driven
+feedback are not part of this synthetic harness.
+
+Run the parity suites after building:
+
+```bash
+python3 -m unittest discover -s deployment_cpp14/tests -p 'test_online*.py' -v
+python3 deployment_cpp14/tests/test_four_mode_rollout.py
+python3 deployment_cpp14/tests/test_fixed_nmpc.py
+deployment_cpp14/build/test_online_contract
+```
+
+For CMake-built executables set ACTOR_CRITIC_PROBE, ONLINE_CONTROLLER_PROBE,
+FOUR_MODE_PROBE and FIXED_NMPC_PROBE to their respective absolute paths before
+running Python tests. The contract test uses assertions even in Release.
+No Pi deadline, real sensor state observer, actuator mapping, UART control or
+real-vehicle validation is claimed by these tests.
+
+## Real CSV route: full Python/C++ comparison
+
+Build from the repository root; `reference_probe` and `route_controller` are now
+included in `build/`:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+python3 deployment_cpp14/tests/test_reference_path.py
+python3 deployment_cpp14/tests/test_route_controller.py
+```
+
+Run both languages on your actual evaluation CSV and checkpoint:
+
+```bash
+python3 deployment_cpp14/tools/compare_route.py --checkpoint nmpc_casadi/results_v11_best/checkpoint_best_frozen.npz --config nmpc_casadi/evaluation_four_modes_5/evaluation_config.json --reference nmpc_casadi/test_reference/test_xref.csv --output route_comparison_01 --max-steps 2500 --horizon 20 --seed 0
+```
+
+Replace checkpoint/config paths with your files. Omit --config to use checkpoint
+metadata as exported; it does not silently apply editable Python evaluation
+settings. The comparison uses the existing Python TrainEnvironment,
+adaptive_rollout and frozen_rollout, without editing those modules. C++ reads
+the **original CSV independently**; Python-generated horizons are never fed to
+it. The run checks that source reference bytes stay unchanged during evaluation.
+
+Native route handling implements the ten-column CAD validation, heading unwrap,
+0.20 m horizon-only tail, local segment search (0.15 m back, 1.2 m ahead),
+monotonic progress, interpolation, midpoint horizon and geometric CTE. The
+runtime uses legacy Python geometry/constraints (.2515 m, +/- .55 rad) for this
+comparison, not an implicit switch to the calibrated hardware limits.
+
+The initial normal/heading offsets, feedforward RK4 guess, rate-limited fresh
+retry guess, two SQP attempts, held previous control after both fail, three-fail
+termination and final .03 m progress margin match the Python simulation. A
+failed retry does not overwrite the warm start. **This hold-and-learn fallback
+belongs to simulation parity, not an implemented hardware failure policy.**
+It differs intentionally from the earlier short synthetic probe's abort policy.
+Fixed preserves simultaneous completion/failure flags if the third held step
+crosses the goal threshold. Adaptive mode rejects that combination as the
+original Python compute_training_reward helper does. Native exit codes are
+0 reached, 2 failure-terminal (takes priority over reached), 3 truncated, and
+1 invalid input/I/O/runtime error; inspect the saved flags too.
+
+One saved epsilon tape is used by both languages, shared by control-step index
+across modes. Task Qe/Re and optional learning-only failure penalties come from
+the explicit exported configuration. --feature-scale route (default) matches
+what the existing evaluator actually passes as train_length_m: the current
+map length. --feature-scale train uses the checkpoint's training length in BOTH
+languages; this changes the experiment and is recorded, not silently selected.
+
+Outputs:
+
+- trajectories.png, cte_mean_max.png, full_adapt_weights.png: native results.
+- python_cpp_overlay.png: both languages plotted together for each mode.
+- MODE_python.csv and MODE_cpp.csv: per-step states, weights, CTE, rewards,
+  solver status, features and updates; the final post-action point is retained.
+- MODE_cpp.csv.model and .summary: final native parameters and metrics.
+- initial.model + provenance JSON, epsilon.npy, settings.txt, manifest.json:
+  shared model/settings and checkpoint/reference/config/binary SHA256 hashes.
+- parity.json: per-field errors, final tensor comparisons, status/count checks.
+- MODE_solver_replays/: failed Python NLP inputs, native replays and diagnostic
+  evaluations, when the sibling fixed_nmpc_probe executable is available. The
+  native probe accepts dynamic_weights=1 for these exact solver requests.
+
+Default tolerances are atol=1e-7, rtol=1e-6 and are saved in parity.json. A
+comparison exits **4** if any strict parity check differs; this preserves all
+results and plots, rather than treating the run as a successful match.
+`trajectory_pass` excludes only differences in primary/retry selection;
+`pass` still checks those discrete diagnostics. End-of-run failure/truncation,
+step count and applied controls remain part of trajectory checks. A stopped
+run is marked incomplete on plots and cannot be compared as a completed lap.
+
+On the recorded three-seed test, Fixed/Critic/Full match in all seeds and Actor
+matches fully in seed 1. Actor seed 2 matches trajectory/weights but retry
+selection differs; Actor seed 0 fails in both languages at slightly different
+steps. Saved failed-input replays match numerically and in failure status.
+Do not claim all four modes have unconditional full-route parity or stable
+learning based only on the small fixture tests. See the detailed verification
+record in docs/superpowers/plans/2026-11-10-route-cpp-verification.md.
+
+Gaussian sensor noise, STM32 emulation and hardware actuation are subsequent
+milestones; this comparison uses clean simulated state feedback.
