@@ -45,7 +45,7 @@ bool parse(const std::string& input,Telemetry& output,std::string& error){
     }catch(const std::exception& ex){error=ex.what();return false;}
 }
 Odometry::Odometry(Config c):cfg_(c){
-    if(!std::isfinite(c.x0)||!std::isfinite(c.y0)||!std::isfinite(c.yaw0)||!std::isfinite(c.metres_per_count)||c.metres_per_count<=0||!std::isfinite(c.max_speed)||c.max_speed<=0||c.max_gap_ms==0)throw std::runtime_error("invalid odometry configuration");
+    if(!std::isfinite(c.x0)||!std::isfinite(c.y0)||!std::isfinite(c.yaw0)||!std::isfinite(c.metres_per_count)||c.metres_per_count<=0||!std::isfinite(c.max_speed)||c.max_speed<=0||c.max_gap_ms==0||c.gyro_sign < -1||c.gyro_sign > 1)throw std::runtime_error("invalid odometry configuration");
     pose_.x=c.x0;pose_.y=c.y0;pose_.yaw=c.yaw0;
 }
 bool Odometry::update(const Telemetry& p,std::string& status){
@@ -55,8 +55,9 @@ bool Odometry::update(const Telemetry& p,std::string& status){
     auto skew=p.enc_ms-p.imu_ms;auto reverse=p.imu_ms-p.enc_ms;
     if(skew>cfg_.max_skew_ms&&reverse>cfg_.max_skew_ms){status="sensor_skew";return false;}
     const double direction=cfg_.imu_clockwise?-1.:1.;
+    const double gyro_direction=cfg_.gyro_sign==0?direction:cfg_.gyro_sign;
     double imu=p.yaw_deg*pi/180.;
-    if(!initialized_){initialized_=true;last_=p;imu_yaw_=imu;pose_.vx=p.speed;pose_.r=direction*p.gyro_dps*pi/180.;status="initialized";return true;}
+    if(!initialized_){initialized_=true;last_=p;imu_yaw_=imu;pose_.vx=p.speed;pose_.r=gyro_direction*p.gyro_dps*pi/180.;status="initialized";return true;}
     if(!newer(p.sequence,last_.sequence)){status="duplicate_or_reordered_packet";return false;}
     if(p.enc_sequence==last_.enc_sequence){status="duplicate_encoder";return false;}
     if(!newer(p.enc_sequence,last_.enc_sequence)||!newer(p.enc_ms,last_.enc_ms)){
@@ -70,7 +71,7 @@ bool Odometry::update(const Telemetry& p,std::string& status){
     // Unwrap relative increments; retain continuous yaw for Actor physical features.
     const double turn=direction*wrap(imu-imu_yaw_);const double mid=pose_.yaw+turn*.5;
     pose_.x+=ds*std::cos(mid);pose_.y+=ds*std::sin(mid);pose_.yaw+=turn;
-    pose_.travel+=ds;pose_.vx=p.speed;pose_.r=direction*p.gyro_dps*pi/180.;
+    pose_.travel+=ds;pose_.vx=p.speed;pose_.r=gyro_direction*p.gyro_dps*pi/180.;
     last_=p;imu_yaw_=imu;status="updated";return true;
 }
 }

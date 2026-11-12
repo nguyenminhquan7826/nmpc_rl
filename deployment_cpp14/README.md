@@ -149,8 +149,16 @@ entire replayed/delayed serial stream. This is not an actuator safety layer.
   becomes the local heading reference; absolute compass yaw is not map yaw.
 - Default yaw convention matches laas-bfmc step12-status-sync: BNO heading
   increases clockwise, mathematical yaw increases counterclockwise. Use
-  --imu-ccw only after verifying the sensor mounting/convention. Apply the same
-  sign conversion to gyro Z and degrees->radians.
+  --imu-ccw only after verifying the sensor mounting/convention.
+- Gyro Z can have a different convention from BNO heading. `--gyro-sign 1`
+  converts raw gyro deg/s to rad/s without negation; `--gyro-sign -1` negates it.
+  The override is independent of heading and command-line option order. If
+  omitted, gyro retains the legacy conversion linked to `--imu-ccw`.
+  The rotation_03 recording shows opposing yaw/gyro directions with the legacy
+  conversion; use `--gyro-sign 1` with default heading for that mounting as an
+  offline candidate. Confirm a physical left turn gives positive yaw change
+  AND positive r before using this convention for control or sensor fusion.
+  Calibration and physical mounting still require verification.
 - Physical yaw is unwrapped continuously for later Actor feature parity.
 - Travel = difference of cumulative signed enc_total * metres_per_count.
   encoder delta belongs only to the latest 10 ms sample and is deliberately NOT
@@ -460,3 +468,14 @@ record in docs/superpowers/plans/2026-11-10-route-cpp-verification.md.
 
 Gaussian sensor noise, STM32 emulation and hardware actuation are subsequent
 milestones; this comparison uses clean simulated state feedback.
+
+### Replay with independent gyro convention
+
+```bash
+./build/telemetry_rx --input rotation_03.log --output rotation_03_corrected.csv --gyro-sign 1
+```
+
+Use the original TEL log for a faithful replay. A CSV lacks some raw TEL fields;
+a reconstructed TEL stream is only a synthetic diagnostic. Existing CSV gyro can
+be negated for offline comparison, but that does not recreate missing wire data.
+No Kalman filter, automatic sign inference, or actuator command is added here.

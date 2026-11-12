@@ -90,5 +90,7 @@ if(UNIX AND NMPC_RX_TEST_PYTHON)
     COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx.py" $<TARGET_FILE:telemetry_rx>)
   add_test(NAME telemetry_serial_startup
     COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx_startup.py" $<TARGET_FILE:telemetry_rx>)
-  set_tests_properties(telemetry_serial_replay telemetry_serial_startup PROPERTIES TIMEOUT 15)
+  add_test(NAME telemetry_gyro_sign
+    COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx_gyro_sign.py" $<TARGET_FILE:telemetry_rx>)
+  set_tests_properties(telemetry_gyro_sign telemetry_serial_replay telemetry_serial_startup PROPERTIES TIMEOUT 15)
 endif()

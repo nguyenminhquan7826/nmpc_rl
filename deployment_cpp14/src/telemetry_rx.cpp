@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
       if (arg == "--help") {
         std::cout << "RX only: --input TEL.log | --device /dev/ttyUSB0 [--output pose.csv] "
                      "[--raw-log TEL.log] [--duration 30] [--startup-discard-ms 500] [--x0 0 --y0 "
-                     "0 --yaw0-deg 0] [--imu-ccw]\n";
+                     "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1]\n";
         return 0;
       }
       if (i + 1 >= argc)
@@ -62,7 +62,11 @@ int main(int argc, char **argv) {
         duration = number(value);
       else if (arg == "--startup-discard-ms")
         startup_discard_ms = number(value);
-      else if (arg == "--x0")
+      else if (arg == "--gyro-sign") {
+        if (value != "1" && value != "-1")
+          throw std::runtime_error("gyro-sign must be 1 or -1");
+        config.gyro_sign = value == "1" ? 1 : -1;
+      } else if (arg == "--x0")
         config.x0 = number(value);
       else if (arg == "--y0")
         config.y0 = number(value);

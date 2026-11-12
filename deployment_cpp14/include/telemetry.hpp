@@ -17,6 +17,8 @@ struct Config {
     double x0=0,y0=0,yaw0=0;
     double metres_per_count=2*pi*.0325/(11*4*19*(38./13.));
     bool imu_clockwise=true;
+    // 0 preserves legacy heading-linked conversion; +/-1 overrides raw gyro Z.
+    int gyro_sign=0;
     double max_speed=.8;
     std::uint32_t max_age_ms=100,max_skew_ms=50,max_gap_ms=200;
 };
