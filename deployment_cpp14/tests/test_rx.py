@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert abs(float(rows[2]['signed_travel_m'])-72*2*3.141592653589793*.0325/(836*38/13))<1e-12
     assert 'invalid_frames=2' in r.stderr
     master,slave=pty.openpty();path=os.ttyname(slave)
-    proc=subprocess.Popen([exe,'--device',path,'--duration','0.8','--raw-log',str(tmp/'capture.log')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    proc=subprocess.Popen([exe,'--device',path,'--duration','0.8','--startup-discard-ms','0','--raw-log',str(tmp/'capture.log')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     # Wait for termios raw mode so line discipline cannot echo test bytes.
     import termios
     deadline=time.monotonic()+2

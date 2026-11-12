@@ -88,6 +88,35 @@ deployment_cpp14/build/telemetry_rx --device /dev/ttyUSB0 --duration 30 --raw-lo
 deployment_cpp14/build/telemetry_rx --input tel_run01.log --output pose_replay01.csv --x0 0 --y0 0 --yaw0-deg 0
 ```
 
+Live serial capture first flushes queued input and drains incoming bytes for
+**500 ms by default**, then flushes again and skips through the next newline.
+This prevents an old ST-Link/USB FIFO fragment from initializing odometry just
+before the first current frame creates a huge timestamp gap. Keep the vehicle
+at its known initial pose during startup. A stderr message `Serial capture
+started after ... ms startup discard` marks the start of the duration window;
+wait for this message and keep still briefly before a movement trial.
+
+Use `--startup-discard-ms 1000` for a longer initial drain, or 0 to disable the
+startup grace period for diagnostics. The allowed range is 0–10000 ms. The
+host input queue is still flushed at opening when grace is 0. The option does
+not alter file replay: `--input` always processes every saved byte. Raw logs
+contain only retained bytes after initial synchronization, so replay reproduces
+the CSV. `startup_discarded_read_bytes` counts bytes actively read/discarded;
+additional bytes removed by tcflush are not counted.
+
+Startup draining mitigates buffered bursts; without clock synchronization it
+cannot prove absolute host freshness or recover unknown movement across an
+in-run gap. The existing >200 ms gap latch stays active throughout capture.
+No automatic pose reset/rebase is introduced. Old CSV files with latched
+odometry cannot be made valid by this fix; start a new measurement at a known
+pose. The receiver remains RX-only and emits no application commands.
+
+Serial startup and replay regression test:
+
+```bash
+python3 deployment_cpp14/tests/test_rx_startup.py build/telemetry_rx
+```
+
 Choose new output paths; existing files are refused. Ctrl+C closes capture.
 Input is raw newline-delimited firmware TEL frames, not the Python simulation
 CSV. Unsupported debug lines/bad CRCs are rejected. A partial trailing frame

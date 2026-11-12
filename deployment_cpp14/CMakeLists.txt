@@ -82,3 +82,13 @@ if(BUILD_FIXED_NMPC)
   add_executable(route_controller src/route_controller.cpp)
   target_link_libraries(route_controller PRIVATE fixed_nmpc online_ac reference_path)
 endif()
+
+# Optional host/Pi PTY regression checks; receiver runtime remains Python-free.
+find_program(NMPC_RX_TEST_PYTHON NAMES python3)
+if(UNIX AND NMPC_RX_TEST_PYTHON)
+  add_test(NAME telemetry_serial_replay
+    COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx.py" $<TARGET_FILE:telemetry_rx>)
+  add_test(NAME telemetry_serial_startup
+    COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx_startup.py" $<TARGET_FILE:telemetry_rx>)
+  set_tests_properties(telemetry_serial_replay telemetry_serial_startup PROPERTIES TIMEOUT 15)
+endif()
