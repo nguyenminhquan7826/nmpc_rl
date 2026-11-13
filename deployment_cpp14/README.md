@@ -534,3 +534,34 @@ shifts on a 5 ms grid within +/-250 ms, and reports zero-lag and best-lag errors
 plus an exploratory amplitude gain. Subsample interpolation is not evidence of
 5 ms physical timing accuracy. It never changes live data or applies a gain.
 See `docs/sensor_kalman_validation.md` for current findings and limits.
+
+### Labelled turn evaluation (standard-library Python)
+
+`audit_turns.py` measures heading change, trapezoid gyro integral and a separately
+bias-corrected gyro integral between supplied time boundaries. It retains
+unwrapped yaw and interpolates at window endpoints. References are **signed
+independent angles**, not heading-derived labels. For example a physically
+verified 90-degree left turn has reference_deg=90; right return -90. Leave null
+if unknown: the report will not invent reference errors. Replace all example
+times in `examples/turn_windows.json` with actual observed turn boundaries
+(seconds since first IMU timestamp).
+
+```bash
+python3 deployment_cpp14/tools/audit_turns.py rotation_03.csv \
+  --windows my_turn_windows.json --gyro-multiplier -1 --bias-dps 0 \
+  --output turn_audit.json
+python3 deployment_cpp14/tests/test_turn_audit.py
+```
+
+For new CSV captured with `--gyro-sign 1`, use `--gyro-multiplier 1`; old legacy
+rotation_03 uses -1. Do not invert twice. Bias is an explicitly supplied deg/s
+value from a separate stationary check, not a value fitted to the turn itself.
+With unknown bias keep 0 and report the uncompensated result. Gain ratios from
+near-zero net turns are uninformative and not a calibrated scale factor.
+Input must be an accepted-only continuous segment with new IMU timestamps and
+gaps <=200ms; split invalid sections rather than silently integrating them.
+Host timestamps are absent, so this cannot certify STM32 clock accuracy.
+
+STM32 configuration readback is prepared separately in firmware repository
+`STM32_IMU`, branch `sensor-config-diagnostics`; TEL v1 remains unchanged.
+See that branch's `SENSOR_CONFIG_READBACK.md` before flashing.
