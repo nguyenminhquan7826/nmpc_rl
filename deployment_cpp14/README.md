@@ -565,3 +565,61 @@ Host timestamps are absent, so this cannot certify STM32 clock accuracy.
 STM32 configuration readback is prepared separately in firmware repository
 `STM32_IMU`, branch `sensor-config-diagnostics`; TEL v1 remains unchanged.
 See that branch's `SENSOR_CONFIG_READBACK.md` before flashing.
+
+## Host/STM32 clock-rate trial (120 seconds)
+
+Record source timestamps AND host read timestamps without changing STM32
+firmware. Keep the vehicle stationary and motor power disconnected. After
+startup-discard completion let capture finish normally; don't suspend/debug
+STM32, replay old data or run another serial reader during the trial.
+
+```bash
+cmake -S . -B build -DBUILD_FIXED_NMPC=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target telemetry_rx test_telemetry test_yaw_kalman -j2
+./build/telemetry_rx --device /dev/ttyACM0 --duration 120 \
+  --startup-discard-ms 1000 --gyro-sign 1 --host-timestamps \
+  --raw-log clock_trial_01.log --output clock_trial_01.csv
+python3 deployment_cpp14/tools/audit_clock_rate.py clock_trial_01.csv \
+  --output clock_trial_01_report.json
+```
+
+Use a new filename on repeats (02,03); receiver refuses overwrites. Send CSV,
+original TEL log, JSON and the final terminal counters for analysis. The new
+CSV is essential: older CSV/TEL cannot reconstruct original host receive times.
+
+`--host-timestamps` is opt-in and serial-only (`--device`); `--input` rejects
+it. With it CSV appends:
+
+- `host_rx_monotonic_ns`: integer `std::chrono::steady_clock` nanoseconds sampled
+  immediately after OS `read()` returns, before file logging/CRC parsing.
+  On Linux this is a monotonic clock, not UTC and not comparable across boots.
+- `host_rx_elapsed_s`: relative to the first CRC-valid retained frame's read.
+- `host_rx_batch_id`: one identifier per successful OS read. Multiple complete
+  frames from one read share a timestamp/ID. A fragmented frame uses the read
+  that completes its newline. IDs can start above 1 due to startup discard.
+
+Raw TEL log bytes remain unchanged. The default CSV schema is unchanged without
+this flag, including when Kalman is disabled. Receive timestamps measure a host
+read event, NOT the hardware sampling, UART first-byte or end-to-end latency.
+
+The standard-library Python audit uses accepted rows, validates monotonic host
+and forward/rollover source time, keeps the latest source packet per read time,
+drops the first 5 host seconds, and forms 5-second median bins. A median pairwise
+slope (at most 200 bins) estimates source seconds per host second, with OLS and
+half-recording comparisons for diagnostics. At least 60 seconds and 8 populated
+bins are required; 120 seconds is recommended. Source epoch and host epoch are
+irrelevant; subtract integer nanoseconds before converting to seconds.
+
+A ratio of 1.02 means source time advances about 2% faster than host receive
+time in that recording. It is an **apparent clock rate**, not yet oscillator
+calibration: changing USB backlog/scheduler delay can mimic drift, and the host
+clock itself is not a certified standard. Inspect warnings/residuals and repeat
+before concluding a time-scale error. No gain, sensor unit, gyro integration
+time, firmware or live clock is automatically corrected by this feature.
+
+Host regression checks:
+
+```bash
+python3 deployment_cpp14/tests/test_clock_audit.py
+python3 deployment_cpp14/tests/test_rx_host_time.py ./build/telemetry_rx
+```

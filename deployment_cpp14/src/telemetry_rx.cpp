@@ -36,10 +36,14 @@ int main(int argc, char **argv) {
     std::string input, device, output, raw_log;
     double duration = 30, startup_discard_ms = 500;
     deployment::Config config;
-    bool kalman_enabled = false;
+    bool kalman_enabled = false, host_timestamps = false;
     deployment::YawKalmanConfig kalman_config;
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
+      if (arg == "--host-timestamps") {
+        host_timestamps = true;
+        continue;
+      }
       if (arg == "--yaw-kalman") {
         kalman_enabled = true;
         continue;
@@ -54,7 +58,8 @@ int main(int argc, char **argv) {
                "pose.csv] "
                "[--raw-log TEL.log] [--duration 30] [--startup-discard-ms 500] "
                "[--x0 0 --y0 "
-               "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1] [--yaw-kalman]\n"
+               "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1] [--yaw-kalman] "
+               "[--host-timestamps]\n"
                "[--kf-heading-sigma-deg 1] [--kf-gyro-sigma-dps 0.35] "
                "[--kf-bias-rw-dps 0.01]\n";
         return 0;
@@ -95,6 +100,10 @@ int main(int argc, char **argv) {
     }
     if (input.empty() == device.empty())
       throw std::runtime_error("select exactly one --input or --device");
+    if (host_timestamps && !input.empty())
+      throw std::runtime_error(
+          "--host-timestamps requires --device; historical receive times "
+          "cannot be reconstructed from --input");
     if (!(duration > 0 && duration < 86400))
       throw std::runtime_error("duration must be in (0,86400) seconds");
     if (!(startup_discard_ms >= 0 && startup_discard_ms <= 10000))
@@ -135,12 +144,17 @@ int main(int argc, char **argv) {
         << (kalman_enabled ? ",kf_status,yaw_kf_rad,gyro_bias_kf_radps,r_bias_"
                              "corrected_radps"
                            : "")
+        << (host_timestamps
+                ? ",host_rx_monotonic_ns,host_rx_elapsed_s,host_rx_batch_id"
+                : "")
         << '\n'
         << std::setprecision(15);
     deployment::Odometry odom(config);
     std::string buffer;
     bool discard = false;
     unsigned good = 0, bad = 0, rejected = 0;
+    std::uint64_t host_read_ns = 0, host_origin_ns = 0, host_batch_id = 0;
+    bool host_origin_set = false;
     auto consume = [&](const char *data, std::size_t size) {
       if (raw)
         raw.write(data, static_cast<std::streamsize>(size));
@@ -171,6 +185,10 @@ int main(int argc, char **argv) {
           continue;
         }
         ++good;
+        if (host_timestamps && !host_origin_set) {
+          host_origin_ns = host_read_ns;
+          host_origin_set = true;
+        }
         bool accepted = odom.update(p, status);
         if (!accepted)
           ++rejected;
@@ -214,6 +232,10 @@ int main(int argc, char **argv) {
           } else
             out << ",,,";
         }
+        if (host_timestamps)
+          out << ',' << host_read_ns << ','
+              << static_cast<double>(host_read_ns - host_origin_ns) * 1e-9
+              << ',' << host_batch_id;
         out << '\n';
         buffer.clear();
       }
@@ -285,6 +307,14 @@ int main(int argc, char **argv) {
           char bytes[256];
           auto count = ::read(port.fd, bytes, sizeof(bytes));
           if (count > 0) {
+            // One timestamp per completed OS read, before raw logging/parsing.
+            // All complete frames in this batch share it; not per-byte wire
+            // time.
+            host_read_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    Clock::now().time_since_epoch())
+                    .count());
+            ++host_batch_id;
             const auto size = static_cast<std::size_t>(count);
             if (!capturing) {
               discarded_bytes += size;
