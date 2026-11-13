@@ -1,0 +1,32 @@
+[
+  {
+    "name": "turn_1_hand_aligned_NO_ANGLE_REFERENCE",
+    "start_s": 6.0075,
+    "end_s": 23.509,
+    "reference_deg": null
+  },
+  {
+    "name": "turn_2_hand_aligned_NO_ANGLE_REFERENCE",
+    "start_s": 23.509,
+    "end_s": 34.5075,
+    "reference_deg": null
+  },
+  {
+    "name": "turn_3_hand_aligned_NO_ANGLE_REFERENCE",
+    "start_s": 34.5075,
+    "end_s": 44.007999999999996,
+    "reference_deg": null
+  },
+  {
+    "name": "turn_4_hand_aligned_NO_ANGLE_REFERENCE",
+    "start_s": 44.007999999999996,
+    "end_s": 54.007000000000005,
+    "reference_deg": null
+  },
+  {
+    "name": "turn_5_hand_aligned_NO_ANGLE_REFERENCE",
+    "start_s": 54.007000000000005,
+    "end_s": 61.028,
+    "reference_deg": null
+  }
+]

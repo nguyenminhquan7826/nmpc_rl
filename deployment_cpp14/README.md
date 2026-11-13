@@ -623,3 +623,18 @@ Host regression checks:
 python3 deployment_cpp14/tests/test_clock_audit.py
 python3 deployment_cpp14/tests/test_rx_host_time.py ./build/telemetry_rx
 ```
+
+### Offline time-scale sensitivity for recorded turns
+
+`audit_turns.py --source-clock-ratio R` accepts an explicitly supplied trial
+ratio (STM32 seconds per host second), default 1. Window boundaries and the
+legacy duration_s stay in original SOURCE seconds. It retains raw
+`gyro_integral_deg` and adds `gyro_time_corrected_integral_deg` and
+`time_corrected_duration_s`. Heading and gyro amplitude do not change. The
+bias-corrected angle, if bias is supplied, subtracts bias over corrected time.
+Reference-angle errors remain null unless an independent angle is supplied.
+
+This is an offline sensitivity check, not a live clock/PID/NMPC correction.
+A ratio from one host-clock recording is not assumed calibrated for all runs.
+See `docs/sensor_reports/turn_90_02/time_scale_trial.md` for the trial using
+1.020673210227752 measured in clock_trial_01 and the remaining disagreement.

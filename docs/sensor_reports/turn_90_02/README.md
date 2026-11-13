@@ -2,6 +2,8 @@
 
 [Mở hình phân tích](diagnostics.png) · [So sánh góc](turn_angles.png) · [Bảng CSV](turn_comparison.csv) · [Tải gói ZIP](turn_90_02_results.zip)
 
+[Xem thử nghiệm hiệu chỉnh thang thời gian](time_scale_trial.md)
+
 ## Tính liên tục
 
 3.059 mẫu, tất cả accepted; số thứ tự gói liên tục, chu kỳ gửi 20 ms.
