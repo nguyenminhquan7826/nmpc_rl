@@ -479,3 +479,58 @@ Use the original TEL log for a faithful replay. A CSV lacks some raw TEL fields;
 a reconstructed TEL stream is only a synthetic diagnostic. Existing CSV gyro can
 be negated for offline comparison, but that does not recreate missing wire data.
 No Kalman filter, automatic sign inference, or actuator command is added here.
+
+## Experimental optional yaw/bias Kalman
+
+The existing independent `--gyro-sign 1` mapping remains explicit; defaults are
+unchanged. Enable the **diagnostic** filter on replay or RX-only serial capture:
+
+```bash
+cmake -S . -B build -DBUILD_FIXED_NMPC=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target telemetry_rx test_telemetry test_yaw_kalman -j2
+ctest --test-dir build --output-on-failure
+./build/telemetry_rx --input rotation_03.log --output filtered.csv \
+  --gyro-sign 1 --yaw-kalman \
+  --kf-heading-sigma-deg 1 --kf-gyro-sigma-dps 0.35 --kf-bias-rw-dps 0.01
+```
+
+With `--yaw-kalman`, CSV appends `kf_status,yaw_kf_rad,gyro_bias_kf_radps,
+r_bias_corrected_radps`. Existing measured yaw, rate, X/Y and all previous CSV
+columns remain unchanged. Filtered yaw is continuous in radians; bias and
+corrected rate are rad/s. Corrected rate subtracts estimated bias and is **not**
+a separately smoothed gyro signal. Without the flag the original CSV schema is
+unchanged. NMPC/odometry do not automatically consume the experimental output.
+
+The filter uses state [yaw,bias], gyro input, heading observation, wrapped
+innovation and Joseph covariance. `dt` comes from IMU timestamps. Initial
+standard deviations are 1 degree yaw and 1 degree/s bias. Noise options above
+are trial assumptions: heading standard deviation (degrees), sampled gyro
+standard deviation (degrees/s), and bias random-walk density
+(degrees/s/sqrt(second)). All must be finite in (0,1000]. No calibration-based
+noise model or magnetic-jump rejection is implemented. BNO NDOF heading already
+uses gyro; the prototype does **not** model that correlation, so its covariance
+is not a calibrated uncertainty bound and improvement on hardware is unproven.
+
+Only accepted odometry samples with new IMU time/sequence update the filter.
+Duplicate IMU samples or rejected odometry samples have blank KF numeric fields
+and an explicit status. An IMU gap above 200 ms latches a filter restart-required
+status and returns exit code 2, without changing odometry's separate fault policy. Heading-only missing
+updates are supported by the filter core for tests; the current TEL receiver
+requires the normal valid/fresh sensor flags before any filter update.
+
+### Relative heading/gyro timing audit (host only)
+
+```bash
+# Old rotation_03.csv used the legacy negative gyro conversion:
+python3 deployment_cpp14/tools/audit_imu_timing.py rotation_03.csv \
+  --gyro-multiplier -1 --output timing_audit.json
+# For a CSV captured using --gyro-sign 1 use --gyro-multiplier 1 instead.
+python3 deployment_cpp14/tests/test_imu_timing.py
+```
+
+This analysis requires numpy only on the analysis host, not on Pi receiver
+runtime. It compares 100 ms averaged rates over rotating samples, scans relative
+shifts on a 5 ms grid within +/-250 ms, and reports zero-lag and best-lag errors
+plus an exploratory amplitude gain. Subsample interpolation is not evidence of
+5 ms physical timing accuracy. It never changes live data or applies a gain.
+See `docs/sensor_kalman_validation.md` for current findings and limits.

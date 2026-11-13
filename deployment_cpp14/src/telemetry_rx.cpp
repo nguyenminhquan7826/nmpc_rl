@@ -1,4 +1,5 @@
 #include "telemetry.hpp"
+#include "yaw_kalman.hpp"
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -35,16 +36,27 @@ int main(int argc, char **argv) {
     std::string input, device, output, raw_log;
     double duration = 30, startup_discard_ms = 500;
     deployment::Config config;
+    bool kalman_enabled = false;
+    deployment::YawKalmanConfig kalman_config;
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
+      if (arg == "--yaw-kalman") {
+        kalman_enabled = true;
+        continue;
+      }
       if (arg == "--imu-ccw") {
         config.imu_clockwise = false;
         continue;
       }
       if (arg == "--help") {
-        std::cout << "RX only: --input TEL.log | --device /dev/ttyUSB0 [--output pose.csv] "
-                     "[--raw-log TEL.log] [--duration 30] [--startup-discard-ms 500] [--x0 0 --y0 "
-                     "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1]\n";
+        std::cout
+            << "RX only: --input TEL.log | --device /dev/ttyUSB0 [--output "
+               "pose.csv] "
+               "[--raw-log TEL.log] [--duration 30] [--startup-discard-ms 500] "
+               "[--x0 0 --y0 "
+               "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1] [--yaw-kalman]\n"
+               "[--kf-heading-sigma-deg 1] [--kf-gyro-sigma-dps 0.35] "
+               "[--kf-bias-rw-dps 0.01]\n";
         return 0;
       }
       if (i + 1 >= argc)
@@ -66,7 +78,13 @@ int main(int argc, char **argv) {
         if (value != "1" && value != "-1")
           throw std::runtime_error("gyro-sign must be 1 or -1");
         config.gyro_sign = value == "1" ? 1 : -1;
-      } else if (arg == "--x0")
+      } else if (arg == "--kf-heading-sigma-deg")
+        kalman_config.heading_sigma_deg = number(value);
+      else if (arg == "--kf-gyro-sigma-dps")
+        kalman_config.gyro_sigma_dps = number(value);
+      else if (arg == "--kf-bias-rw-dps")
+        kalman_config.bias_rw_dps = number(value);
+      else if (arg == "--x0")
         config.x0 = number(value);
       else if (arg == "--y0")
         config.y0 = number(value);
@@ -80,13 +98,25 @@ int main(int argc, char **argv) {
     if (!(duration > 0 && duration < 86400))
       throw std::runtime_error("duration must be in (0,86400) seconds");
     if (!(startup_discard_ms >= 0 && startup_discard_ms <= 10000))
-      throw std::runtime_error("startup-discard-ms must be finite in [0,10000]");
+      throw std::runtime_error(
+          "startup-discard-ms must be finite in [0,10000]");
     if ((!output.empty() && (output == input || output == raw_log)) ||
         (!raw_log.empty() && raw_log == input))
       throw std::runtime_error("input/output paths must differ");
     for (const auto &path : {output, raw_log})
       if (!path.empty() && std::ifstream(path).good())
         throw std::runtime_error("refusing to overwrite: " + path);
+    deployment::YawKalman kalman(kalman_config);
+    if (kalman_enabled)
+      std::cerr << "Experimental yaw KF: heading_sigma_deg="
+                << kalman_config.heading_sigma_deg
+                << " gyro_sigma_dps=" << kalman_config.gyro_sigma_dps
+                << " bias_rw_dps=" << kalman_config.bias_rw_dps
+                << " heading_clockwise=" << config.imu_clockwise
+                << " gyro_sign_override=" << config.gyro_sign
+                << " (0=legacy)\n";
+    bool kf_initialized = false, kf_fault = false;
+    std::uint32_t kf_ms = 0, kf_seq = 0;
     std::ofstream csv, raw;
     if (!output.empty()) {
       csv.open(output);
@@ -99,8 +129,13 @@ int main(int argc, char **argv) {
         throw std::runtime_error("cannot open raw log");
     }
     auto &out = output.empty() ? std::cout : csv;
-    out << "packet_seq,tx_ms,enc_ms,imu_ms,accepted,status,X_est_m,Y_est_m,yaw_est_rad,vx_measured_"
-           "mps,r_measured_radps,signed_travel_m,enc_total,flags,calib_hex\n"
+    out << "packet_seq,tx_ms,enc_ms,imu_ms,accepted,status,X_est_m,Y_est_m,yaw_"
+           "est_rad,vx_measured_"
+           "mps,r_measured_radps,signed_travel_m,enc_total,flags,calib_hex"
+        << (kalman_enabled ? ",kf_status,yaw_kf_rad,gyro_bias_kf_radps,r_bias_"
+                             "corrected_radps"
+                           : "")
+        << '\n'
         << std::setprecision(15);
     deployment::Odometry odom(config);
     std::string buffer;
@@ -140,10 +175,46 @@ int main(int argc, char **argv) {
         if (!accepted)
           ++rejected;
         const auto &pose = odom.pose();
-        out << p.sequence << ',' << p.tx_ms << ',' << p.enc_ms << ',' << p.imu_ms << ',' << accepted
-            << ',' << status << ',' << pose.x << ',' << pose.y << ',' << pose.yaw << ',' << pose.vx
-            << ',' << pose.r << ',' << pose.travel << ',' << p.total_ticks << ',' << p.flags << ','
-            << std::hex << p.calibration << std::dec << '\n';
+        out << p.sequence << ',' << p.tx_ms << ',' << p.enc_ms << ','
+            << p.imu_ms << ',' << accepted << ',' << status << ',' << pose.x
+            << ',' << pose.y << ',' << pose.yaw << ',' << pose.vx << ','
+            << pose.r << ',' << pose.travel << ',' << p.total_ticks << ','
+            << p.flags << ',' << std::hex << p.calibration << std::dec;
+        if (kalman_enabled) {
+          std::string state = "odometry_rejected";
+          bool fresh = false;
+          if (accepted) {
+            if (kf_fault)
+              state = "filter_gap_restart_required";
+            else if (!kf_initialized) {
+              kalman.initialize(pose.yaw);
+              kf_initialized = true;
+              fresh = true;
+              state = "initialized";
+            } else if (p.imu_ms == kf_ms || p.imu_sequence == kf_seq)
+              state = "duplicate_imu";
+            else {
+              const auto delta = p.imu_ms - kf_ms;
+              if (delta > 200) {
+                kf_fault = true;
+                state = "filter_gap_restart_required";
+              } else {
+                kalman.update(pose.r, delta * .001, pose.yaw);
+                fresh = true;
+                state = "updated";
+              }
+            }
+          }
+          out << ',' << state;
+          if (fresh) {
+            kf_ms = p.imu_ms;
+            kf_seq = p.imu_sequence;
+            out << ',' << kalman.yaw() << ',' << kalman.bias() << ','
+                << pose.r - kalman.bias();
+          } else
+            out << ",,,";
+        }
+        out << '\n';
         buffer.clear();
       }
     };
@@ -170,7 +241,8 @@ int main(int argc, char **argv) {
       cfsetispeed(&settings, B115200);
       cfsetospeed(&settings, B115200);
       settings.c_cflag =
-          (settings.c_cflag & ~(CSIZE | PARENB | CSTOPB | CRTSCTS)) | CS8 | CLOCAL | CREAD;
+          (settings.c_cflag & ~(CSIZE | PARENB | CSTOPB | CRTSCTS)) | CS8 |
+          CLOCAL | CREAD;
       if (tcsetattr(port.fd, TCSANOW, &settings) != 0)
         throw std::runtime_error("tcsetattr failed");
       std::signal(SIGINT, stop);
@@ -182,19 +254,23 @@ int main(int argc, char **argv) {
       std::size_t discarded_bytes = 0;
       while (!stopped) {
         const auto now = Clock::now();
-        if (!capturing && std::chrono::duration<double, std::milli>(now - startup_start).count() >=
-                              startup_discard_ms) {
-          // Adapters may deliver their own old FIFO after the initial host flush.
+        if (!capturing &&
+            std::chrono::duration<double, std::milli>(now - startup_start)
+                    .count() >= startup_discard_ms) {
+          // Adapters may deliver their own old FIFO after the initial host
+          // flush.
           if (startup_discard_ms > 0 && tcflush(port.fd, TCIFLUSH) != 0)
             throw std::runtime_error("post-startup input flush failed");
           capture_start = Clock::now();
           capturing = true;
           align_to_line = startup_discard_ms > 0;
           std::cerr << "Serial capture started after " << startup_discard_ms
-                    << " ms startup discard; keep the vehicle at its initial pose until now\n";
+                    << " ms startup discard; keep the vehicle at its initial "
+                       "pose until now\n";
         }
         if (capturing &&
-            std::chrono::duration<double>(Clock::now() - capture_start).count() >= duration)
+            std::chrono::duration<double>(Clock::now() - capture_start)
+                    .count() >= duration)
           break;
         pollfd event{port.fd, POLLIN, 0};
         int result = ::poll(&event, 1, 100);
@@ -231,7 +307,8 @@ int main(int argc, char **argv) {
             throw std::runtime_error("serial read failed");
         }
       }
-      // tcflush may drop additional kernel-buffered bytes not included in this count.
+      // tcflush may drop additional kernel-buffered bytes not included in this
+      // count.
       std::cerr << "startup_discarded_read_bytes=" << discarded_bytes << '\n';
     }
     if (!buffer.empty() || discard) {
@@ -239,8 +316,11 @@ int main(int argc, char **argv) {
       std::cerr << "Incomplete trailing frame ignored\n";
     }
     std::cerr << "CRC-valid=" << good << " invalid_frames=" << bad
-              << " odometry_rejected=" << rejected << " fault_latched=" << odom.faulted() << '\n';
-    return good == 0 || odom.faulted() ? 2 : 0;
+              << " odometry_rejected=" << rejected
+              << " fault_latched=" << odom.faulted() << '\n';
+    if (kalman_enabled)
+      std::cerr << "kf_fault_latched=" << kf_fault << '\n';
+    return good == 0 || odom.faulted() || kf_fault ? 2 : 0;
   } catch (const std::exception &e) {
     std::cerr << "Error: " << e.what() << '\n';
     return 1;
