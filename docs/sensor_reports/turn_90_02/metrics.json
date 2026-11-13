@@ -1,0 +1,171 @@
+{
+  "samples": 3059,
+  "accepted": 3059,
+  "duration_STM32_s": 61.159,
+  "packet_sequence_gaps": 0,
+  "tx_interval_ms": [
+    20,
+    20
+  ],
+  "imu_age_ms": [
+    6,
+    9
+  ],
+  "max_sensor_skew_ms": 8,
+  "calibration_hex_counts": {
+    "34": 3059
+  },
+  "encoder_min_max": [
+    0,
+    0
+  ],
+  "plateaus": [
+    {
+      "start_s": 2,
+      "end_s": 10,
+      "median_time_s": 6.0075,
+      "heading_median_deg": -0.059999999999994405,
+      "gyro_integral_median_deg": -0.04843749999999882,
+      "gyro_mean_dps": -0.0015624999999999318,
+      "gyro_std_dps": 0.10581789622579808
+    },
+    {
+      "start_s": 21,
+      "end_s": 26,
+      "median_time_s": 23.509,
+      "heading_median_deg": 96.80999999999999,
+      "gyro_integral_median_deg": 101.41776562499979,
+      "gyro_mean_dps": 0.05899999999999937,
+      "gyro_std_dps": 0.16725623633926756
+    },
+    {
+      "start_s": 33,
+      "end_s": 36,
+      "median_time_s": 34.5075,
+      "heading_median_deg": 1.6300000000000074,
+      "gyro_integral_median_deg": 2.328843749999722,
+      "gyro_mean_dps": -0.011249999999999422,
+      "gyro_std_dps": 0.10470025528323937
+    },
+    {
+      "start_s": 42,
+      "end_s": 46,
+      "median_time_s": 44.007999999999996,
+      "heading_median_deg": 83.36999999999985,
+      "gyro_integral_median_deg": 87.55074999999977,
+      "gyro_mean_dps": -0.011874999999999993,
+      "gyro_std_dps": 0.101880481632588
+    },
+    {
+      "start_s": 52,
+      "end_s": 56,
+      "median_time_s": 54.007000000000005,
+      "heading_median_deg": -1.5599999999999805,
+      "gyro_integral_median_deg": -1.1743125000001704,
+      "gyro_mean_dps": -0.0021875000000000045,
+      "gyro_std_dps": 0.4918213596855715
+    },
+    {
+      "start_s": 60.9,
+      "end_s": 61.15,
+      "median_time_s": 61.028,
+      "heading_median_deg": 91.37000000000006,
+      "gyro_integral_median_deg": 95.80581249999977,
+      "gyro_mean_dps": -9.54097911787244e-16,
+      "gyro_std_dps": 0.3274817829770334
+    }
+  ],
+  "turns": [
+    {
+      "turn": 1,
+      "direction_from_logged_sign": "left_positive",
+      "from_window_s": [
+        2,
+        10
+      ],
+      "to_window_s": [
+        21,
+        26
+      ],
+      "heading_change_deg": 96.86999999999998,
+      "gyro_integral_change_deg": 101.4662031249998,
+      "gyro_over_heading_ratio": 1.0474471263032912,
+      "independent_reference_deg": null,
+      "last_endpoint_short": false
+    },
+    {
+      "turn": 2,
+      "direction_from_logged_sign": "right_negative",
+      "from_window_s": [
+        21,
+        26
+      ],
+      "to_window_s": [
+        33,
+        36
+      ],
+      "heading_change_deg": -95.17999999999998,
+      "gyro_integral_change_deg": -99.08892187500007,
+      "gyro_over_heading_ratio": 1.0410687316137854,
+      "independent_reference_deg": null,
+      "last_endpoint_short": false
+    },
+    {
+      "turn": 3,
+      "direction_from_logged_sign": "left_positive",
+      "from_window_s": [
+        33,
+        36
+      ],
+      "to_window_s": [
+        42,
+        46
+      ],
+      "heading_change_deg": 81.73999999999984,
+      "gyro_integral_change_deg": 85.22190625000005,
+      "gyro_over_heading_ratio": 1.0425973360655765,
+      "independent_reference_deg": null,
+      "last_endpoint_short": false
+    },
+    {
+      "turn": 4,
+      "direction_from_logged_sign": "right_negative",
+      "from_window_s": [
+        42,
+        46
+      ],
+      "to_window_s": [
+        52,
+        56
+      ],
+      "heading_change_deg": -84.92999999999982,
+      "gyro_integral_change_deg": -88.72506249999994,
+      "gyro_over_heading_ratio": 1.0446845931943969,
+      "independent_reference_deg": null,
+      "last_endpoint_short": false
+    },
+    {
+      "turn": 5,
+      "direction_from_logged_sign": "left_positive",
+      "from_window_s": [
+        52,
+        56
+      ],
+      "to_window_s": [
+        60.9,
+        61.15
+      ],
+      "heading_change_deg": 92.93000000000004,
+      "gyro_integral_change_deg": 96.98012499999994,
+      "gyro_over_heading_ratio": 1.0435825352415786,
+      "independent_reference_deg": null,
+      "last_endpoint_short": true
+    }
+  ],
+  "limitations": [
+    "Physical 90-degree reference not yet confirmed",
+    "No original UART log or host timestamps",
+    "Last heading plateau is only ~0.44 seconds",
+    "No scale or bias correction applied"
+  ]
+}

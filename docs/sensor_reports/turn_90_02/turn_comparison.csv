@@ -1,0 +1,6 @@
+turn,direction_from_logged_sign,from_window_s,to_window_s,heading_change_deg,gyro_integral_change_deg,gyro_over_heading_ratio,independent_reference_deg,last_endpoint_short
+1,left_positive,"[2, 10]","[21, 26]",96.86999999999998,101.4662031249998,1.0474471263032912,,False
+2,right_negative,"[21, 26]","[33, 36]",-95.17999999999998,-99.08892187500007,1.0410687316137854,,False
+3,left_positive,"[33, 36]","[42, 46]",81.73999999999984,85.22190625000005,1.0425973360655765,,False
+4,right_negative,"[42, 46]","[52, 56]",-84.92999999999982,-88.72506249999994,1.0446845931943969,,False
+5,left_positive,"[52, 56]","[60.9, 61.15]",92.93000000000004,96.98012499999994,1.0435825352415786,,True
