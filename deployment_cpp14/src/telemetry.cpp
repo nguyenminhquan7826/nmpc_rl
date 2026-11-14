@@ -33,7 +33,7 @@ bool parse(const std::string& input,Telemetry& output,std::string& error){
         if(crc16(s.substr(0,split))!=integer(s.substr(split+1),0,65535,16))throw std::runtime_error("CRC mismatch");
         std::vector<std::string> f;std::size_t from=0;
         for(std::size_t i=0;i<=s.size();++i)if(i==s.size()||s[i]==','){f.push_back(s.substr(from,i-from));from=i+1;}
-        if(f.size()!=20||f[0]!="TEL"||f[1]!="1")throw std::runtime_error("unsupported TEL format/version");
+        if(f.size()<2||f[0]!="TEL"||!((f[1]=="1"&&f.size()==20)||(f[1]=="2"&&f.size()==29)))throw std::runtime_error("unsupported TEL format/version");
         auto u=[&](int i){return static_cast<std::uint32_t>(integer(f[i],0,4294967295LL));};
         Telemetry p{};p.sequence=u(2);p.tx_ms=u(3);p.enc_sequence=u(4);p.enc_ms=u(5);
         p.total_ticks=static_cast<std::int32_t>(integer(f[6],-2147483648LL,2147483647LL));
@@ -41,6 +41,13 @@ bool parse(const std::string& input,Telemetry& output,std::string& error){
         p.servo_deg=static_cast<int>(integer(f[9],-2147483648LL,2147483647LL));p.pwm=static_cast<int>(integer(f[10],-2147483648LL,2147483647LL));
         p.imu_sequence=u(11);p.imu_ms=u(12);p.ax=real(f[13]);p.ay=real(f[14]);p.gyro_dps=real(f[15]);p.yaw_deg=real(f[16]);
         p.calibration=static_cast<unsigned>(integer(f[17],0,255,16));p.flags=static_cast<unsigned>(integer(f[18],0,255));
+        p.protocol_version=static_cast<unsigned>(integer(f[1],1,2));
+        if(p.protocol_version==2) {
+            p.gyro_x_dps=real(f[19]);p.gyro_y_dps=real(f[20]);p.roll_deg=real(f[21]);p.pitch_deg=real(f[22]);
+            p.read_start_ms=u(23);p.read_end_ms=u(24);p.enc_interval_ms=u(25);
+            p.system_status=static_cast<unsigned>(integer(f[26],0,255));p.system_error=static_cast<unsigned>(integer(f[27],0,255));
+            if(p.read_end_ms!=p.imu_ms||p.read_end_ms-p.read_start_ms>=0x80000000U)throw std::runtime_error("inconsistent IMU read timestamps");
+        }
         output=p;error.clear();return true;
     }catch(const std::exception& ex){error=ex.what();return false;}
 }

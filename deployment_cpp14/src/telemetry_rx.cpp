@@ -36,10 +36,13 @@ int main(int argc, char **argv) {
     std::string input, device, output, raw_log;
     double duration = 30, startup_discard_ms = 500;
     deployment::Config config;
-    bool kalman_enabled = false, host_timestamps = false;
+    bool kalman_enabled = false, host_timestamps = false, diagnostics = false;
     deployment::YawKalmanConfig kalman_config;
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
+      if (arg == "--diagnostics") {
+        diagnostics = true; continue;
+      }
       if (arg == "--host-timestamps") {
         host_timestamps = true;
         continue;
@@ -59,7 +62,7 @@ int main(int argc, char **argv) {
                "[--raw-log TEL.log] [--duration 30] [--startup-discard-ms 500] "
                "[--x0 0 --y0 "
                "0 --yaw0-deg 0] [--imu-ccw] [--gyro-sign 1|-1] [--yaw-kalman] "
-               "[--host-timestamps]\n"
+               "[--host-timestamps] [--diagnostics]\n"
                "[--kf-heading-sigma-deg 1] [--kf-gyro-sigma-dps 0.35] "
                "[--kf-bias-rw-dps 0.01]\n";
         return 0;
@@ -147,6 +150,7 @@ int main(int argc, char **argv) {
         << (host_timestamps
                 ? ",host_rx_monotonic_ns,host_rx_elapsed_s,host_rx_batch_id"
                 : "")
+        << (diagnostics ? ",tel_version,enc_seq,imu_seq,enc_delta_ticks,speed_reported_mps,servo_command_deg,pwm_command,linear_ax_mps2,linear_ay_mps2,gyro_z_raw_dps,heading_raw_deg,gyro_x_raw_dps,gyro_y_raw_dps,roll_raw_deg,pitch_raw_deg,imu_read_start_ms,imu_read_end_ms,enc_interval_ms,imu_system_status,imu_system_error" : "")
         << '\n'
         << std::setprecision(15);
     deployment::Odometry odom(config);
@@ -236,6 +240,16 @@ int main(int argc, char **argv) {
           out << ',' << host_read_ns << ','
               << static_cast<double>(host_read_ns - host_origin_ns) * 1e-9
               << ',' << host_batch_id;
+        if (diagnostics) {
+          out << ',' << p.protocol_version << ',' << p.enc_sequence << ',' << p.imu_sequence
+              << ',' << p.delta_ticks << ',' << p.speed << ',' << p.servo_deg << ',' << p.pwm
+              << ',' << p.ax << ',' << p.ay << ',' << p.gyro_dps << ',' << p.yaw_deg;
+          if(p.protocol_version==2)
+            out << ',' << p.gyro_x_dps << ',' << p.gyro_y_dps << ',' << p.roll_deg << ',' << p.pitch_deg
+                << ',' << p.read_start_ms << ',' << p.read_end_ms << ',' << p.enc_interval_ms
+                << ',' << p.system_status << ',' << p.system_error;
+          else out << ",,,,,,,,,";
+        }
         out << '\n';
         buffer.clear();
       }

@@ -124,7 +124,7 @@ is ignored. Overlong lines are discarded through the next newline.
 
 ## Exact firmware protocol
 
-Source firmware: nguyenminhquan7826/STM32_IMU, commit
+Legacy TEL v1 source: nguyenminhquan7826/STM32_IMU, commit
 08516ddd29cdf0eb7c58e1a0f4e4339ed39f4f66, Bosch_update/Core/Src/communication.c.
 USART2 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control.
 
@@ -132,9 +132,9 @@ USART2 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control.
 TEL,1,packet_seq,tx_ms,enc_seq,enc_ms,enc_total,enc_delta,speed_mps,steering_cmd_deg,pwm_cmd,imu_seq,imu_ms,lin_ax,lin_ay,gyro_z_dps,yaw_deg,calib,flags,crc16\r\n
 ```
 
-Exactly 20 fields. Calibration is hexadecimal; flags are decimal. CRC is four
+TEL v1 has exactly 20 fields. The diagnostic firmware below defaults to TEL v2; the receiver supports both. Calibration is hexadecimal; flags are decimal. CRC is four
 hex digits: CCITT-FALSE, init FFFF, polynomial 1021, covering TEL through flags
-(exclude comma preceding CRC and CR/LF). Fields are range/finite-validated.
+for v1, or through imu_system_error for v2 (exclude comma preceding CRC and CR/LF). Fields are range/finite-validated.
 CRC-valid is not the same as a usable sensor sample.
 
 Flags bits 0 and 1 must both be set. Embedded timestamp ages must be <=100 ms;
@@ -638,3 +638,58 @@ This is an offline sensitivity check, not a live clock/PID/NMPC correction.
 A ratio from one host-clock recording is not assumed calibrated for all runs.
 See `docs/sensor_reports/turn_90_02/time_scale_trial.md` for the trial using
 1.020673210227752 measured in clock_trial_01 and the remaining disagreement.
+
+
+## Sensor pipeline diagnostics (TEL v2)
+
+Update/build the Pi receiver **before flashing the new STM32 diagnostic firmware**.
+The receiver accepts TEL1 (20 fields) and TEL2 (29 fields). Default CSV/odometry
+columns remain available; use `--diagnostics` to retain sensor-reported values
+and v2 metadata. An old receiver cannot decode TEL2. Firmware can be rebuilt
+with TELEMETRY_PROTOCOL_VERSION=1 to retain its legacy v1/50Hz output.
+
+TEL2 keeps v1 fields through flags, then appends before CRC:
+
+```
+gyro_x_dps,gyro_y_dps,roll_deg,pitch_deg,imu_read_start_ms,imu_read_end_ms,enc_interval_ms,imu_system_status,imu_system_error
+```
+
+TEL2 sends at nominal 25Hz to retain UART bandwidth headroom; IMU/encoder tasks
+remain nominal 100Hz and motor/servo nominal 50Hz. These are diagnostic logs,
+not every 100Hz IMU sample. Heading/roll/pitch use 4 decimal places, retaining
+1/16-degree resolution. The parser enforces read_end==imu_ms and forward/wrapped
+read timing. A v1 frame has empty v2-only diagnostic CSV fields.
+
+`--diagnostics` appends raw sensor-reported degrees/deg/s (not normalized or
+unscaled register words), sequence IDs, encoder delta/interval, commands, linear
+acceleration and system status/error. Heading and gyro XYZ still use the sensor's
+axes; do not treat them as a full vehicle-frame attitude transform. No new
+Kalman settings, source clock scaling or calibration gate is applied.
+`imu_read_start/end` bound the I2C sensor/status read, not internal physical
+sample times. Host receive timestamps remain distinct OS read events.
+
+Capture stationary, then slow flat turns; keep motor power disconnected for
+initial verification and let STM32 run without debug suspensions:
+
+```bash
+./build/telemetry_rx --device /dev/ttyACM0 --duration 90 \
+  --startup-discard-ms 1000 --gyro-sign 1 --host-timestamps --diagnostics \
+  --raw-log pipeline_01.log --output pipeline_01.csv
+python3 deployment_cpp14/tools/audit_sensor_pipeline.py pipeline_01.log pipeline_01.csv \
+  --gyro-sign 1 --output pipeline_01_audit.json
+```
+
+The independent standard-library audit checks original TEL CRC, field mapping,
+integer/float preservation, sign/degree conversion and accepted-pose midpoint
+integration, and retains mismatch examples. It flags invalid/incomplete lines.
+It does not prove physical angle accuracy or the receiver's acceptance policy;
+read hardware I2C/UART counters separately. It assumes default wheel geometry;
+provide matching x0/y0/yaw0 and heading/gyro signs if receiver options differ.
+No angle or clock is silently fitted. Sensor bias, magnetic interference,
+calibration and tilt can only be assessed against appropriate physical evidence.
+
+Firmware changes remove PWM startup on encoder TIM3, check encoder HAL startup,
+and calculate encoder velocity and PID dt from measured **STM32** intervals.
+This handles scheduler jitter; it does not calibrate the source ms clock. Check
+`g_encoder_task_status` and manually turn the wheel before any powered PID test.
+Full firmware build and motor/PID bench validation remain required in CubeIDE.

@@ -9,6 +9,10 @@ struct Telemetry {
     int delta_ticks,servo_deg,pwm;
     double speed,ax,ay,gyro_dps,yaw_deg;
     unsigned calibration,flags;
+    unsigned protocol_version=1;
+    double gyro_x_dps=0,gyro_y_dps=0,roll_deg=0,pitch_deg=0;
+    std::uint32_t read_start_ms=0,read_end_ms=0,enc_interval_ms=0;
+    unsigned system_status=0,system_error=0;
 };
 std::uint16_t crc16(const std::string& text);
 bool parse(const std::string& line,Telemetry& packet,std::string& error);

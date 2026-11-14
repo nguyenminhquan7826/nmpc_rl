@@ -103,5 +103,9 @@ if(UNIX AND NMPC_RX_TEST_PYTHON)
     COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx_host_time.py" $<TARGET_FILE:telemetry_rx>)
   add_test(NAME sensor_clock_audit
     COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_clock_audit.py")
-  set_tests_properties(sensor_clock_audit telemetry_host_timestamps sensor_turn_audit telemetry_yaw_kalman telemetry_gyro_sign telemetry_serial_replay telemetry_serial_startup PROPERTIES TIMEOUT 15)
+  add_test(NAME telemetry_v2_diagnostics
+    COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rx_v2.py" $<TARGET_FILE:telemetry_rx>)
+  add_test(NAME sensor_pipeline_audit
+    COMMAND "${NMPC_RX_TEST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pipeline_audit.py")
+  set_tests_properties(sensor_pipeline_audit telemetry_v2_diagnostics sensor_clock_audit telemetry_host_timestamps sensor_turn_audit telemetry_yaw_kalman telemetry_gyro_sign telemetry_serial_replay telemetry_serial_startup PROPERTIES TIMEOUT 15)
 endif()
