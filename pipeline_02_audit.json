@@ -1,0 +1,28 @@
+{
+  "mapping_and_pose_passed": true,
+  "frames": 2295,
+  "csv_rows": 2295,
+  "mismatch_count": 0,
+  "mismatch_examples": [],
+  "invalid_or_incomplete_raw_lines": 1,
+  "passed": false,
+  "v2_quality": {
+    "max_abs_sensor_roll_deg": 12.0625,
+    "max_abs_sensor_pitch_deg": 2.5625,
+    "system_error_nonzero_frames": 2295,
+    "read_duration_ms_range": [
+      5,
+      8
+    ],
+    "encoder_interval_ms_range": [
+      10,
+      10
+    ]
+  },
+  "limitations": [
+    "Raw fields are sensor-reported SI/degree values, not original register counts",
+    "Does not validate physical angle, mounting, calibration or source-clock accuracy",
+    "Accept/reject decisions are consumed from CSV, not independently reimplemented",
+    "Fixed production wheel geometry is assumed for pose arithmetic"
+  ]
+}
