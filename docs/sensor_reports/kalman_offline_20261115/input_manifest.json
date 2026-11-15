@@ -1,0 +1,29 @@
+{
+  "stationary": {
+    "source": "imu_boot_01.csv",
+    "sha256": "4060076858e191eaac0783fd019e81a449cc303bae4383f3c5f42f6dd4e27d6f",
+    "rows": 765,
+    "accepted": 765,
+    "health_available": true,
+    "nonzero_system_error_rows": 0,
+    "note": "Original CSV accepted decisions consumed; no UART reconstruction or independent acceptance reimplementation."
+  },
+  "turn": {
+    "source": "turn_90_02.csv",
+    "sha256": "ad441076bf97f8ab5612d5825aa1f6152548d67790e79295efcee937afdcb175",
+    "rows": 3059,
+    "accepted": 3059,
+    "health_available": false,
+    "nonzero_system_error_rows": null,
+    "note": "Original CSV accepted decisions consumed; no UART reconstruction or independent acceptance reimplementation."
+  },
+  "fusion_error": {
+    "source": "pipeline_02.csv",
+    "sha256": "b808c3b7829e39d72432dde55102e0db8a0a146e9b95d7ae6b1ea8bf6e0052f4",
+    "rows": 2295,
+    "accepted": 2295,
+    "health_available": true,
+    "nonzero_system_error_rows": 2295,
+    "note": "Original CSV accepted decisions consumed; no UART reconstruction or independent acceptance reimplementation."
+  }
+}
