@@ -1,0 +1,21 @@
+{
+  "description": "Initial low-speed bench settings, not hardware-identified dynamics. Review before drive.",
+  "N": 20,
+  "Ts": 0.08,
+  "sqp_max_iter": 7,
+  "model": [2.400611620795107, 0.044, 0.4, 0.35, 0.130952380952381, 0.119047619047619, 0.02, 9.81, 0.01],
+  "max_speed": 0.15,
+  "max_steering_deg": 22.835397,
+  "servo_sign": 1,
+  "acceleration_lower": -2.0,
+  "acceleration_upper": 2.0,
+  "du_lower": [-0.2, -0.04],
+  "du_upper": [0.2, 0.04],
+  "yaw_rate_limit": 4.0,
+  "beta_max": 0.6,
+  "vy_abs_max": 0.6,
+  "min_reference_speed": 0.05,
+  "state_timeout_ms": 120,
+  "solve_budget_ms": 60,
+  "ack_timeout_ms": 100
+}

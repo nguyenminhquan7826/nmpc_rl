@@ -1,11 +1,11 @@
 # Pi 5 C++14 deployment components
 
-The telemetry receiver is RX-only: **no motor/servo commands are transmitted**.
-Native NMPC and online Actor/Critic cores are available with an offline
-four-mode numerical runner (see below). The controller is not connected to
-telemetry or actuators yet. It does not stop an already
-moving vehicle; test receiving with the vehicle stationary and drive disabled.
-No Python or CasADi runtime is needed for this receiver.
+`telemetry_rx` remains RX-only. The new `hardware_runner` connects real TEL2
+odometry to native four-mode NMPC and guarded STM32 commands. It defaults to
+shadow (no TX, no learning from unapplied commands); `--drive` is explicit.
+See [the hardware experiment workflow](HARDWARE_EXPERIMENT.md). Native solver
+requires CasADi; on-Pi timing and physical closed-loop/AprilTag validation remain
+pending. Offline parity runners remain available and unchanged.
 
 ## Build all native programs with CMake
 
