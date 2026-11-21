@@ -78,9 +78,59 @@ struct Serial {
     }
   }
 };
+class Keyboard {
+  termios original_{};
+  bool active_ = false;
+
+public:
+  explicit Keyboard(bool enabled) {
+    if (!enabled)
+      return;
+    ensure(tcgetattr(STDIN_FILENO, &original_) == 0,
+           "--keyboard requires an interactive terminal");
+    auto mode = original_;
+    mode.c_lflag &= ~(ICANON | ECHO);
+    mode.c_cc[VMIN] = 0;
+    mode.c_cc[VTIME] = 0;
+    ensure(tcsetattr(STDIN_FILENO, TCSANOW, &mode) == 0,
+           "Cannot configure keyboard terminal");
+    active_ = true;
+  }
+  ~Keyboard() {
+    if (active_)
+      tcsetattr(STDIN_FILENO, TCSANOW, &original_);
+  }
+
+  bool stop_requested(bool &start_requested) const {
+    if (!active_)
+      return false;
+    pollfd input{STDIN_FILENO, POLLIN, 0};
+    const int ready = ::poll(&input, 1, 0);
+    if (ready < 0 && errno == EINTR)
+      return false;
+    ensure(ready >= 0, "Keyboard poll failed");
+    if (input.revents & (POLLHUP | POLLERR | POLLNVAL))
+      return true;
+    if (!(input.revents & POLLIN))
+      return false;
+    char keys[64];
+    const auto count = ::read(STDIN_FILENO, keys, sizeof(keys));
+    if (count < 0 && errno == EINTR)
+      return false;
+    ensure(count >= 0, "Keyboard read failed");
+    for (ssize_t i = 0; i < count; ++i) {
+      if (keys[i] == 'q')
+        return true;
+      if (keys[i] == 'r')
+        start_requested = true;
+    }
+    return false;
+  }
+};
+
 struct Options {
   std::string model, settings, reference, output, device, input, mode = "fixed";
-  bool drive = false, x = false, y = false, yaw = false;
+  bool drive = false, keyboard = false, x = false, y = false, yaw = false;
   double x0 = 0, y0 = 0, yaw0 = 0, duration = 60, discard_ms = 1000;
   unsigned seed = 0;
 };
@@ -90,6 +140,10 @@ Options options(int argc, char **argv) {
     std::string a = argv[i];
     if (a == "--drive") {
       o.drive = true;
+      continue;
+    }
+    if (a == "--keyboard") {
+      o.keyboard = true;
       continue;
     }
     ensure(i + 1 < argc, "Missing option value");
@@ -140,6 +194,7 @@ Options options(int argc, char **argv) {
          "Choose exactly one device or replay input");
   ensure(!o.drive || (!o.device.empty() && o.x && o.y && o.yaw),
          "Drive requires serial and explicit x0/y0/yaw0-deg");
+  ensure(!o.keyboard || o.drive, "--keyboard requires --drive");
   ensure(o.duration > 0 && o.duration <= 3600 && o.discard_ms >= 0 &&
              o.discard_ms <= 10000,
          "Invalid duration/discard");
@@ -264,6 +319,10 @@ int main(int argc, char **argv) {
     }
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+    Keyboard keyboard(o.keyboard);
+    bool start_requested = !o.keyboard;
+    if (o.keyboard)
+      std::cerr << "Press r to start, q to stop and exit.\n";
     enum Phase { SyncStop, WaitHealthy, ArmAck, Ready, RunAck, Feedback };
     Phase phase = o.drive ? SyncStop : Ready;
     std::uint32_t expected = 0, last_imu = 0, ack_ms = 0;
@@ -373,7 +432,16 @@ int main(int argc, char **argv) {
       valid++;
       last_host = Clock::now();
     };
+    auto check_keyboard = [&]() {
+      if (keyboard.stop_requested(start_requested)) {
+        reason = "operator_stop";
+        return true;
+      }
+      return interrupted != 0;
+    };
     auto tick = [&]() {
+      if (check_keyboard())
+        return;
       if (o.drive &&
           (phase == SyncStop || phase == ArmAck || phase == RunAck) &&
           seconds(sent_at) > ack_timeout) {
@@ -387,6 +455,8 @@ int main(int argc, char **argv) {
       if (!have)
         return;
       if (phase == WaitHealthy) {
+        if (!start_requested)
+          return;
         if (std::abs(pose.vx) > .02 || std::abs(pose.r) > .1) {
           stop("arm_requires_stationary_vehicle");
           return;
@@ -488,6 +558,8 @@ int main(int argc, char **argv) {
           stop("loop_deadline");
           return;
         }
+        if (check_keyboard())
+          return;
         transmit("RUN", current.command.speed, current.command.servo);
         phase = RunAck;
       } else {

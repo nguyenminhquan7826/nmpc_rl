@@ -89,6 +89,47 @@ class Tests(unittest.TestCase):
     finally:
      if proc.poll() is None:proc.kill();proc.wait()
      os.close(master);os.close(slave)
+ def test_keyboard_gates_arm_and_q_sends_stop(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d);args=setup(p)
+   master,slave=pty.openpty();keys,terminal=pty.openpty()
+   original=termios.tcgetattr(terminal)
+   os.set_blocking(master,False)
+   proc=subprocess.Popen([str(EXE),*args,'--device',os.ttyname(slave),
+    '--startup-discard-ms','0','--duration','3','--drive','--keyboard',
+    '--x0','0','--y0','0','--yaw0-deg','0'],stdin=terminal,
+    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    start=time.monotonic();next_tel=start;seq=1;buf=b'';actions=[]
+    pressed_r=False;pressed_q=False;last_seq=0
+    while proc.poll() is None and time.monotonic()-start<4:
+     now=time.monotonic();ms=1000+int((now-start)*1000)
+     if now>=next_tel and actions:
+      os.write(master,tel(seq,ms));seq+=1;next_tel=now+.04
+     if now-start>.30 and not pressed_r:
+      self.assertEqual(actions,['STOP'])
+      os.write(keys,b'r');pressed_r=True
+     try:buf+=os.read(master,4096)
+     except BlockingIOError:pass
+     while b'\n' in buf:
+      line,buf=buf.split(b'\n',1);fields=line.decode().strip().split(',')
+      request=int(fields[2]);action=fields[3];actions.append(action)
+      armed=int(action!='STOP')
+      if armed:last_seq=request
+      os.write(master,wire(f'ACK,1,{request},{armed},0,{ms},{last_seq}'))
+      if action=='RUN' and not pressed_q:
+       os.write(keys,b'q');pressed_q=True
+     time.sleep(.002)
+    out,err=proc.communicate(timeout=2);self.assertEqual(proc.returncode,0,out+err)
+    self.assertEqual(actions[:3],['STOP','ARM','RUN'])
+    tx=[row.split(',')[3] for row in (p/'out/tx.log').read_text().splitlines()]
+    self.assertEqual(tx[:3],['STOP','ARM','RUN'])
+    self.assertTrue(tx[3:] and set(tx[3:])=={'STOP'})
+    self.assertIn('reason=operator_stop',(p/'out/summary.txt').read_text())
+    self.assertEqual(termios.tcgetattr(terminal),original)
+   finally:
+    if proc.poll() is None:proc.kill();proc.wait()
+    for fd in (master,slave,keys,terminal):os.close(fd)
  def test_busy_serial_is_never_written_by_second_owner(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d);args=setup(p);master,slave=pty.openpty()
