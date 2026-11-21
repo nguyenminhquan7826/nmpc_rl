@@ -156,16 +156,24 @@ void copy_file(const std::string &a, const std::string &b) {
 int main(int argc, char **argv) {
   using namespace deployment;
   try {
+    // thông số ng dùng nhập
     auto o = options(argc, argv);
     std::map<std::string, Mode> modes{{"fixed", Mode::Fixed},
                                       {"actor_adapt", Mode::ActorAdapt},
                                       {"critic_adapt", Mode::CriticAdapt},
                                       {"full_adapt", Mode::FullAdapt}};
     ensure(modes.count(o.mode), "Invalid mode");
-    auto model = read_numbers(o.model, "AC_MODEL_V1"),
-         config = read_numbers(o.settings, "NMPC_HARDWARE_V1");
-    auto path = ReferencePath::load_csv(o.reference);
+    auto model = read_numbers(o.model, "AC_MODEL_V1"), // đọc dữ liệu số của  các thông số ator và critic
+         config = read_numbers(o.settings, "NMPC_HARDWARE_V1"); // lấy các thông số cuẩ bộ điều khienr mpc
+    auto path = ReferencePath::load_csv(o.reference); // đọc quỹ đạo tham chiếu
+    /*
+    khởi tạo các thông số actor-critic
+    cấu hình nmpc và phần cứng quỹ đạo tham chiếu
+    chế độ điều khiển
+    seed cho bộ sinh số ngẫu nhiên
+    */
     HardwareSession session(model, config, path, modes.at(o.mode), o.seed);
+    // tính toán thời gian và chi phí tính toán của các phần => đánh giá được đáp ứng thời gian thực không
     const double timeout = scalar(config, "state_timeout_ms") * .001,
                  budget = scalar(config, "solve_budget_ms"),
                  ack_timeout = scalar(config, "ack_timeout_ms") * .001;
@@ -173,6 +181,7 @@ int main(int argc, char **argv) {
                budget < session.period() * 1000 && ack_timeout > 0 &&
                ack_timeout <= .15,
            "Invalid runtime deadlines");
+    
     Config odom_cfg;
     odom_cfg.gyro_sign = 1;
     odom_cfg.max_speed = scalar(config, "max_speed") + .05;
@@ -180,6 +189,7 @@ int main(int argc, char **argv) {
     odom_cfg.y0 = o.y ? o.y0 : path.rows().front().state[5];
     odom_cfg.yaw0 = o.yaw ? o.yaw0 : path.rows().front().state[2];
     Odometry odom(odom_cfg);
+    
     ensure(::mkdir(o.output.c_str(), 0755) == 0,
            "Output directory exists or cannot be created");
     copy_file(o.model, o.output + "/initial.model");

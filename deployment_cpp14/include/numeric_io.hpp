@@ -53,6 +53,7 @@ inline Numbers read_numbers(const std::string &path, const std::string &version)
   ensure(in.eof(), "Input read error");
   return data;
 }
+
 inline void write_numbers(const std::string &path, const std::string &version,
                           const Numbers &data) {
   std::ofstream out(path);
