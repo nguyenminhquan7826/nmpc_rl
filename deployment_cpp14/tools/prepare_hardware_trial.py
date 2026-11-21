@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 
 def settings(c,route,learning):
- with route.open() as f:rows=list(csv.DictReader(f))
+ with route.open(encoding='utf-8-sig',newline='') as f:rows=list(csv.DictReader(f))
  if len(rows)<2:raise ValueError('Route requires two rows')
  speed=[float(r['vx_ref_mps']) for r in rows];progress=[float(r['s_m']) for r in rows]
  if not all(math.isfinite(x) for x in speed+progress):raise ValueError('Nonfinite route')
@@ -16,6 +16,18 @@ def settings(c,route,learning):
  limit=math.radians(c['max_steering_deg']);p=list(map(float,c['model']))
  if len(p)!=9 or not all(math.isfinite(v) and v>0 for v in p) or abs(sum(p[4:6])-.25)>1e-6:raise ValueError('Invalid hardware dynamics/wheelbase')
  if not(0<c['max_speed']<=.5 and 0<limit<=math.radians(22.835397) and c['servo_sign'] in [-1,1] and .04<=c['Ts']<=.1):raise ValueError('Invalid hardware limits')
+ if 'kappa_1_per_m' not in rows[0]:
+  raise ValueError('Missing reference column: kappa_1_per_m')
+ wheelbase=sum(p[4:6])
+ for row,s in zip(rows,progress):
+  curvature=float(row['kappa_1_per_m'])
+  if not math.isfinite(curvature):
+   raise ValueError(f'Nonfinite route curvature at s={s:g} m')
+  steering=abs(math.atan(wheelbase*curvature))
+  if steering>limit+1e-9:
+   raise ValueError(f'CAD steering exceeds limit at s={s:g} m: '
+                    f'{math.degrees(steering):.2f} deg required, '
+                    f'{c["max_steering_deg"]:.2f} deg allowed')
  if not(0<c['solve_budget_ms']<1000*c['Ts'] and 40<=c['state_timeout_ms']<=150 and 0<c['ack_timeout_ms']<=150):raise ValueError('Invalid deadlines')
  q=learning['Qe_fixed'];r=learning['Re_fixed']
  if len(q)!=6 or len(r)!=2 or not all(math.isfinite(float(v)) and float(v)>0 for v in q+r):raise ValueError('Invalid reward weights')
@@ -32,7 +44,11 @@ def main():
  with np.load(a.checkpoint,allow_pickle=False) as z:learning=json.loads(str(z['metadata'].item()))
  if a.config:
   extra=json.loads(a.config.read_text());learning.update(extra.get('checkpoint_config',extra))
- hardware=json.loads(a.hardware.read_text());values=settings(hardware,a.reference,learning)
+ hardware=json.loads(a.hardware.read_text())
+ try:
+  values=settings(hardware,a.reference,learning)
+ except ValueError as exc:
+  p.error(str(exc))
  a.output.mkdir(parents=True);export(a.checkpoint,a.output/'initial.model',a.start,a.config,a.horizon,'full_horizon')
  with (a.output/'hardware.settings').open('w') as f:
   f.write('NMPC_HARDWARE_V1\n')
