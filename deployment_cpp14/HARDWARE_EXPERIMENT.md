@@ -158,6 +158,11 @@ bên dưới chỉ dùng sau các kiểm tra đó:
   --output drive_fixed_01
 ```
 
+Thêm `--keyboard` cùng `--drive` để chờ phím `r` trước khi ARM.
+Nhấn `q` để gửi STOP và kết thúc lượt, không cần Enter. Chế độ này cần
+terminal tương tác. `--duration` tính cả thời gian chờ. Firmware watchdog
+vẫn xử lý trường hợp mất liên lạc với Pi.
+
 Startup: bỏ dữ liệu cũ1000ms → STOP/ACK đồng bộ sequence → mẫu khỏe và xe đứng
 → ARM/ACK → giải NMPC → RUN/ACK → state mới sau ACK. Không ACK100ms, stale120ms,
 solver>60ms, bước điều khiển lệch quá hạn, clipping, lỗi fusion/solver hoặc mất
