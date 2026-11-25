@@ -33,6 +33,7 @@ from screen_training_weights import verify_train_reference
 from train_actor_critic import read_screened_box
 from train_rl_environment import TrainEnvironment
 from training_initialization import LEARNING_INITIAL, TRAIN_REFERENCE_SHA256
+from trajectory_selection import identify_checkpoint_train
 
 BASELINES = ("learning_initial","strong_fixed_baseline",
              "stage_lower_terminal_upper")
@@ -46,8 +47,8 @@ def load_frozen_agents(checkpoint, low, high, *, expected_gamma=0.90):
         if "metadata" not in saved:
             raise ValueError("Checkpoint missing training metadata")
         config=json.loads(str(saved["metadata"].item()))
+        identify_checkpoint_train(config)
         if (config.get("reference_role")!="TRAIN_ONLY" or
-            config.get("train_sha256")!=TRAIN_REFERENCE_SHA256 or
             config.get("gamma")!=expected_gamma or
             config.get("Qe_fixed")!=Q_EVAL_CANDIDATE.tolist() or
             config.get("Re_fixed")!=R_EVAL_CANDIDATE.tolist() or
