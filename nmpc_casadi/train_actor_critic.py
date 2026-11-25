@@ -31,11 +31,12 @@ from rl_paper_core import td_error
 from screen_training_weights import verify_train_reference
 from train_rl_environment import TrainEnvironment
 from training_initialization import LEARNING_INITIAL, TRAIN_REFERENCE_SHA256, screening_box
+from trajectory_selection import TRACK_CHOICES, resolve_named_track
 
 
-def read_screened_box(path):
+def read_screened_box(path, expected_digest=TRAIN_REFERENCE_SHA256):
     doc=json.loads(Path(path).read_text(encoding="utf-8"))
-    if (doc.get("train_sha256") != TRAIN_REFERENCE_SHA256 or
+    if (doc.get("train_sha256") != expected_digest or
         doc.get("profile")!="full" or
         doc.get("empirical_all_pass") is not True or
         doc.get("total_samples")!=27 or doc.get("pass_samples")!=27):
@@ -53,10 +54,10 @@ def read_screened_box(path):
     return lo,hi,doc
 
 
-def verify_reward_audit(path, gamma):
+def verify_reward_audit(path, gamma, expected_digest=TRAIN_REFERENCE_SHA256):
     doc=json.loads(Path(path).read_text(encoding="utf-8"))
     if (doc.get("type")!="TRAIN_ONLY_FIXED_REWARD_CANDIDATE_NO_LEARNING" or
-        doc.get("train_sha256")!=TRAIN_REFERENCE_SHA256 or
+        doc.get("train_sha256")!=expected_digest or
         doc.get("cases")!=27 or
         doc.get("Qe")!=Q_EVAL_CANDIDATE.tolist() or
         doc.get("Re")!=R_EVAL_CANDIDATE.tolist() or
@@ -74,7 +75,10 @@ def write_checkpoint(path,actor,critic,metadata):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--reference",type=Path,required=True)
+    ap.add_argument("--reference",type=Path,
+                    help="Legacy checksum-pinned TRAIN CSV (mutually exclusive with --trajectory)")
+    ap.add_argument("--trajectory",choices=TRACK_CHOICES,
+                    help="Use bundled checksum-pinned trajectory: spiral_8m or zigzag_8m")
     ap.add_argument("--screen-manifest",type=Path)
     ap.add_argument("--use-internal-box",action="store_true",
                     help="Use source-defined, formerly screened 20-percent experimental bounds; no external manifest needed")
@@ -151,8 +155,19 @@ def main(argv=None):
     if args.save_at is not None and (len(set(args.save_at))!=len(args.save_at)
                                    or any(ep<1 or ep>args.episodes for ep in args.save_at)):
         ap.error("--save-at must contain unique 1-based episodes within the run")
+    if bool(args.trajectory) == bool(args.reference):
+        ap.error("Specify exactly one of --reference or --trajectory")
     try:
-        ref,digest=verify_train_reference(args.reference)
+        if args.trajectory in ("spiral_8m", "zigzag_8m"):
+            ref,digest=resolve_named_track(args.trajectory)
+            trajectory_name=args.trajectory
+        elif args.trajectory == "pinned":
+            from experiment_config import TRAIN_CSV
+            ref,digest=verify_train_reference(TRAIN_CSV)
+            trajectory_name="pinned"
+        else:
+            ref,digest=verify_train_reference(args.reference)
+            trajectory_name="pinned"
         if args.use_internal_box:
             lo,hi=screening_box(args.box_margin)
             screen_doc={
@@ -161,9 +176,9 @@ def main(argv=None):
                 "empirical_all_pass":None,
             }
         else:
-            lo,hi,screen_doc=read_screened_box(args.screen_manifest)
+            lo,hi,screen_doc=read_screened_box(args.screen_manifest, expected_digest=digest)
         reward_audit_doc=(
-            verify_reward_audit(args.reward_audit_summary,args.gamma)
+            verify_reward_audit(args.reward_audit_summary,args.gamma,expected_digest=digest)
             if args.reward_audit_summary is not None else None
         )
     except (ValueError,KeyError,FileNotFoundError) as exc:
@@ -182,7 +197,7 @@ def main(argv=None):
                                abs(float(b.cfg["u_max"][1]))))
     if staged["reference_sha256"]!=digest:
         raise RuntimeError("TRAIN reference staging changed the original")
-    if args.use_internal_box:
+    if args.use_internal_box and trajectory_name=="pinned":
         # Flat layout: put supporting trajectory derivatives alongside
         # original pinned TRAIN CSV, NOT in the numerical results folder.
         import shutil
@@ -225,6 +240,9 @@ def main(argv=None):
     meta={
         "status":"EXPERIMENTAL_SIMULATION_ONLY_NOT_STABILITY_CERTIFIED",
         "reference_role":"TRAIN_ONLY","train_sha256":digest,
+        "train_trajectory":trajectory_name,
+        "reference_source":str(ref),
+        "reference_geometry_screened_only":trajectory_name!="pinned",
         "train_length_m":b.CAD_S_END,"Ts_s":b.Ts,"N":b.N,
         "initial_Q":q0.tolist(),"initial_R":r0.tolist(),
         "initial_P":p0.tolist(),
