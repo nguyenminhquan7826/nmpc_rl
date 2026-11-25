@@ -21,6 +21,7 @@ from train_actor_critic import write_checkpoint
 from train_rl_environment import TrainEnvironment
 from gaussian_state_sensor import GaussianStateSensor, EXAMPLE_STD
 from training_initialization import TRAIN_REFERENCE_SHA256
+from trajectory_selection import TRACK_CHOICES, resolve_named_track
 from run_experiment import FixedWeightActor
 
 MODES=("fixed","actor_adapt","critic_adapt","full_adapt")
@@ -243,7 +244,10 @@ def plot_actor_diagnostics(log, output):
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint",type=Path,required=True)
-    ap.add_argument("--reference",type=Path,required=True)
+    ap.add_argument("--reference",type=Path,
+        help="Existing external/held-out reference CSV")
+    ap.add_argument("--trajectory",choices=TRACK_CHOICES,
+        help="Select a registered trajectory by name instead of --reference")
     ap.add_argument("--output",type=Path,required=True)
     ap.add_argument("--max-steps",type=int,default=2000)
     ap.add_argument("--seeds",type=int,nargs="+",default=[0,1,2])
@@ -267,6 +271,19 @@ def main(argv=None):
     ap.add_argument("--sensor-seed",type=int,default=10000,
         help="Independent sensor RNG stream: base + evaluation seed, shared by all modes")
     args=ap.parse_args(argv)
+    if bool(args.trajectory) == bool(args.reference):
+        ap.error("Specify exactly one of --trajectory or --reference")
+    if args.trajectory in ("spiral_8m", "zigzag_8m"):
+        eval_reference, _ = resolve_named_track(args.trajectory)
+        eval_track_name=args.trajectory
+    elif args.trajectory == "pinned":
+        from experiment_config import TRAIN_CSV
+        from screen_training_weights import verify_train_reference
+        eval_reference, _ = verify_train_reference(TRAIN_CSV)
+        eval_track_name="pinned"
+    else:
+        eval_reference=args.reference
+        eval_track_name="external"
     if args.sensor_std is not None and not args.sensor_noise:
         ap.error("--sensor-std requires --sensor-noise")
     if args.sensor_seed<0:
@@ -285,7 +302,7 @@ def main(argv=None):
     config["actor_advantage_steps"]=args.actor_advantage_steps;config["actor_advantage_design"]=args.actor_advantage_design
     args.output.mkdir(parents=True,exist_ok=True)
     staging=tempfile.TemporaryDirectory(prefix="nmpc-evaluation-")
-    details,staged=prepare_cad_evaluation_reference(args.reference,Path(staging.name),b.TAIL_LENGTH_M,
+    details,staged=prepare_cad_evaluation_reference(eval_reference,Path(staging.name),b.TAIL_LENGTH_M,
         min_speed_mps=float(b.cfg["vx_min"]),
         max_speed_mps=min(float(b.TEST_SPEED_MPS),float(b.cfg["vx_max"])),
         wheelbase_m=float(b.WHEELBASE_M),
@@ -294,7 +311,10 @@ def main(argv=None):
     manifest={"checkpoint":str(args.checkpoint.resolve()),
         "checkpoint_sha256":sha256_file(args.checkpoint),
         "reference_sha256":staged["reference_sha256"],
-        "same_as_train":staged["reference_sha256"]==TRAIN_REFERENCE_SHA256,
+        "same_as_train":staged["reference_sha256"]==config["train_sha256"],
+        "train_trajectory":config.get("train_trajectory","pinned"),
+        "evaluation_trajectory":eval_track_name,
+        "evaluation_reference_path":str(Path(eval_reference).resolve()),
         "fixed_definition":"initial_Q_R_and_separate_fixed_Qf",
         "modes":list(MODES),
         "actor_diagnostics_definition":"extra Full adapt diagnostic plot only",
@@ -310,7 +330,7 @@ def main(argv=None):
             "reported_cte_and_reward_use_true_plant":True,
             "type":"independent_white_gaussian_experimental_not_sensor_calibration"},
         "cte_plot_definition":"absolute CTE over all logged steps including initial transient",
-        "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(args.reference),"output":str(args.output)},
+        "settings":vars(args)|{"checkpoint":str(args.checkpoint),"reference":str(eval_reference),"output":str(args.output)},
         "checkpoint_config":config,
         "interpretation":"Adaptation learns on this route; do not use it to tune held-out test settings."}
     if args.save_data:
