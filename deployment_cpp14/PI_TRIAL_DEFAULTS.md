@@ -1,7 +1,19 @@
 # Chạy từng mode với cấu hình mặc định trên Raspberry Pi 5
 
 Đứng tại `deployment_cpp14`. Sau khi build và CTest thành công, kích hoạt
-môi trường Python và chuẩn bị dữ liệu **một lần**:
+môi trường Python. Với wheel ARM64 CasADi 3.7.2 đã xác nhận ABI=1 trên Pi này,
+configure bằng tùy chọn rõ ràng (không ép ABI của SDK khác):
+
+```sh
+source .venv/bin/activate
+cmake -S . -B build -DBUILD_FIXED_NMPC=ON -DCMAKE_BUILD_TYPE=Release \
+  -DNMPC_CASADI_ABI=1 -DNMPC_CASADI_PYTHON="$PWD/.venv/bin/python" \
+  -DNMPC_RX_TEST_PYTHON="$PWD/.venv/bin/python"
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+Sau đó chuẩn bị dữ liệu **một lần**:
 
 ```sh
 source .venv/bin/activate

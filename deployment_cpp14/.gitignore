@@ -1,2 +1,5 @@
 /hardware_trial_inputs/
 /hardware_runs/
+/build/
+/build-native/
+/build-pi/
