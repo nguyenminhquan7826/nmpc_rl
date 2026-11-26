@@ -4,6 +4,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <iostream>
 #include <poll.h>
@@ -317,7 +318,7 @@ int main(int argc, char **argv) {
            j++)
         log << ',' << k << j;
     }
-    log << ",slot_host_s,period_ms,reference_ms,feature_ms,actor_proposal_ms,warm_start_ms,command_mapping_ms,proposal_total_ms,feedback_ms,control_compute_ms\n";
+    log << ",slot_host_s,period_ms,reference_ms,feature_ms,actor_proposal_ms,warm_start_ms,command_mapping_ms,proposal_total_ms,feedback_ms,control_compute_ms,selected_packet_seq,latest_packet_seq,sample_receipt_age_ms,feedback_interval_ms,drive_phase_trim_ms\n";
     states << std::setprecision(17)
            << "host_s,packet_seq,tx_ms,imu_ms,accepted,status,X,Y,yaw,vx,r,"
               "system_status,system_error\n";
@@ -362,10 +363,16 @@ int main(int argc, char **argv) {
     bool have = false, have_step = false;
     Telemetry latest{};
     Pose pose;
+    struct Sample {
+      Telemetry telemetry;
+      Pose pose;
+      Clock::time_point received;
+    };
+    std::deque<Sample> drive_samples;
     HardwareStep current;
     auto last_host = Clock::now(), sent_at = Clock::now();
-    // Both live modes use phase-locked host time. Drive fails closed if
-    // ACK or fresh feedback cannot meet the slot; replay uses MCU time.
+    // Shadow remains phase-locked to a fixed host clock. Drive trims the
+    // host phase toward eligible sensor arrivals to avoid accumulating drift.
     const bool live_shadow = !o.drive && !o.device.empty();
     const auto shadow_period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(session.period()));
@@ -377,6 +384,13 @@ int main(int argc, char **argv) {
     const auto drive_grace = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(std::min(.010, session.period() / 8)));
     const double feedback_tolerance = std::min(.015, session.period() * .2);
+    // Age measured since host receipt, not absolute sensor capture latency.
+    const double sample_age_limit = std::min(timeout, session.period() * .5625);
+    const double phase_trim_limit = std::min(.005, session.period() / 16);
+    const double sample_age_target = std::min(.010, session.period() / 8);
+    std::size_t buffered_selections = 0, phase_trims = 0;
+    double phase_trim_sum_ms = 0, phase_trim_max_abs_ms = 0;
+    std::vector<double> sample_age_times, imu_interval_times;
     std::size_t drive_deadline_misses = 0, feedback_count = 0;
     double drive_lateness_max_ms = 0, feedback_sum_ms = 0,
            feedback_max_ms = 0, drive_compute_max_ms = 0;
@@ -492,6 +506,10 @@ int main(int argc, char **argv) {
       have = true;
       valid++;
       last_host = Clock::now();
+      if (o.drive) {
+        drive_samples.push_back({p, s, last_host});
+        while (drive_samples.size() > 8) drive_samples.pop_front();
+      }
     };
     auto check_keyboard = [&]() {
       if (keyboard.stop_requested(start_requested)) {
@@ -542,17 +560,40 @@ int main(int argc, char **argv) {
         if (Clock::now() < shadow_next)
           return;
       }
+      // Keep latest for liveness, health and diagnostics. Use the selected
+      // telemetry AND its matching odometry snapshot for learning/control.
+      Sample selected{latest, pose, last_host};
+      double imu_interval_ms = 0;
       if (have_step && o.drive) {
         if (Clock::now() < drive_next)
           return;
-        const double delta =
-            static_cast<std::uint32_t>(latest.imu_ms - last_imu) * .001;
-        // MCU elapsed time is a feedback validity check, not the scheduler.
-        // A 78/79 ms sample is usable; a 40/120 ms transition is not.
-        if (delta + 1e-6 < session.period() - feedback_tolerance)
-          return;
-        if (delta > session.period() + feedback_tolerance + 1e-6) {
-          stop("drive_feedback_interval");
+        ensure(phase == Feedback, "Drive requires acknowledged previous command");
+        bool found = false;
+        bool interval_candidate = false;
+        for (auto it = drive_samples.rbegin(); it != drive_samples.rend(); ++it) {
+          const auto delta_ms = static_cast<std::uint32_t>(it->telemetry.imu_ms - last_imu);
+          const double delta = delta_ms * .001;
+          if (delta + 1e-6 < session.period() - feedback_tolerance ||
+              delta > session.period() + feedback_tolerance + 1e-6)
+            continue;
+          const auto after = static_cast<std::uint32_t>(it->telemetry.read_start_ms - ack_ms);
+          if (after == 0 || after >= 0x80000000U) continue;
+          interval_candidate = true;
+          if (seconds(it->received) > sample_age_limit) continue;
+          selected = *it;
+          imu_interval_ms = delta_ms;
+          found = true;
+          break;
+        }
+        if (!found) {
+          if (interval_candidate) {
+            stop("drive_feedback_stale");
+            return;
+          }
+          const double latest_delta =
+              static_cast<std::uint32_t>(latest.imu_ms - last_imu) * .001;
+          if (latest_delta > session.period() + feedback_tolerance + 1e-6)
+            stop("drive_feedback_interval");
           return;
         }
       }
@@ -569,14 +610,27 @@ int main(int argc, char **argv) {
         stop("drive_slot_deadline");
         return;
       }
+      const double sample_age_ms =
+          std::chrono::duration<double, std::milli>(slot_begin - selected.received).count();
+      if (o.drive && sample_age_ms > sample_age_limit * 1000) {
+        stop("drive_feedback_stale");
+        return;
+      }
+      const auto &sample = selected.telemetry;
+      const auto &control_pose = selected.pose;
+      if (o.drive && sample.sequence != latest.sequence) {
+        ++buffered_selections;
+        event("buffered_feedback", sample.sequence,
+              "latest_" + std::to_string(latest.sequence));
+      }
       double feedback_this_ms = 0;
       if (phase == Feedback) {
-        auto after = static_cast<std::uint32_t>(latest.read_start_ms - ack_ms);
+        auto after = static_cast<std::uint32_t>(sample.read_start_ms - ack_ms);
         if (after == 0 || after >= 0x80000000U)
           return;
         bool truncating = seconds(origin) + session.period() >= o.duration;
         const auto feedback_begin = Clock::now();
-        auto update = session.feedback(pose, false, truncating);
+        auto update = session.feedback(control_pose, false, truncating);
         const double feedback_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - feedback_begin).count();
         feedback_this_ms = feedback_ms;
@@ -589,7 +643,7 @@ int main(int argc, char **argv) {
         feedback_sum_ms += feedback_ms;
         feedback_max_ms = std::max(feedback_max_ms, feedback_ms);
         transitions << seconds(origin) << ',' << expected << ',' << last_imu
-                    << ',' << latest.imu_ms << ',' << ack_ms << ','
+                    << ',' << sample.imu_ms << ',' << ack_ms << ','
                     << session.reward() << ',' << update.td << ','
                     << update.actor_step_norm << ',' << update.critic_step_norm
                     << ',' << update.batch_size;
@@ -601,7 +655,7 @@ int main(int argc, char **argv) {
                     << ',' << update.critic_update_ms << ',' << run_ack_wait_ms << '\n';
         transitions.flush();
         ensure(bool(transitions), "Transition log failed");
-        event("learning", latest.sequence,
+        event("learning", sample.sequence,
               "td_" + std::to_string(update.td) + "_actor_step_" +
                   std::to_string(update.actor_step_norm) + "_critic_step_" +
                   std::to_string(update.critic_step_norm));
@@ -613,11 +667,34 @@ int main(int argc, char **argv) {
         }
       }
       auto start = Clock::now();
+      double phase_trim_ms = 0;
       if (o.drive) {
         drive_lateness_max_ms = std::max(
             drive_lateness_max_ms,
             std::chrono::duration<double, std::milli>(slot_begin - slot_due).count());
-        drive_next = slot_due + shadow_period;
+        // Follow sensor phase gradually; never jump a full telemetry frame.
+        // Keep nominal Ts in NMPC and learning. Log the actual host period.
+        const double phase_error = std::chrono::duration<double>(
+            selected.received - slot_due).count() + sample_age_target;
+        const double trim = std::max(-phase_trim_limit,
+                                     std::min(phase_trim_limit, phase_error));
+        const auto trimmed = slot_due + shadow_period +
+            std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(trim));
+        // Do not squeeze two executions together even if the prior slot was late.
+        const auto earliest = slot_begin + shadow_period - drive_grace;
+        drive_next = std::max(trimmed, earliest);
+        phase_trim_ms = std::chrono::duration<double, std::milli>(
+            drive_next - (slot_due + shadow_period)).count();
+        if (std::abs(phase_trim_ms) > .001) ++phase_trims;
+        phase_trim_sum_ms += phase_trim_ms;
+        phase_trim_max_abs_ms = std::max(phase_trim_max_abs_ms, std::abs(phase_trim_ms));
+        sample_age_times.push_back(sample_age_ms);
+        if (have_step) imu_interval_times.push_back(imu_interval_ms);
+        // Future selections must never reuse a state at/before this sample.
+        while (!drive_samples.empty() &&
+               drive_samples.front().telemetry.sequence != sample.sequence)
+          drive_samples.pop_front();
+        if (!drive_samples.empty()) drive_samples.pop_front();
       }
       if (live_shadow) {
         if (!have_step) {
@@ -635,7 +712,7 @@ int main(int argc, char **argv) {
           }
         }
       }
-      current = session.propose(pose);
+      current = session.propose(control_pose);
       const double proposal_ms = elapsed_ms(start);
       const double compute_ms = elapsed_ms(slot_begin);
       const double slot_host_s = std::chrono::duration<double>(slot_begin - origin).count();
@@ -653,11 +730,11 @@ int main(int argc, char **argv) {
       warm_start_times.push_back(current.warm_start_ms);
       solve_times.push_back(current.solve_ms);
       step++;
-      last_imu = latest.imu_ms;
+      last_imu = sample.imu_ms;
       have_step = true;
       log << seconds(origin) << ',' << step << ',' << o.mode << ','
-          << latest.imu_ms << ',' << pose.x << ',' << pose.y << ',' << pose.yaw
-          << ',' << pose.vx << ",0," << pose.r << ',' << current.progress << ','
+          << sample.imu_ms << ',' << control_pose.x << ',' << control_pose.y << ',' << control_pose.yaw
+          << ',' << control_pose.vx << ",0," << control_pose.r << ',' << current.progress << ','
           << current.cte << ',' << current.solve_ms << ',' << current.success
           << ',' << current.command.clipped << ',' << current.command.speed
           << ',' << current.command.servo;
@@ -677,7 +754,14 @@ int main(int argc, char **argv) {
       log << ',' << current.reference_ms << ',' << current.feature_ms
           << ',' << current.actor_proposal_ms << ',' << current.warm_start_ms
           << ',' << current.command_mapping_ms << ',' << proposal_ms
-          << ',' << feedback_this_ms << ',' << compute_ms << '\n';
+          << ',' << feedback_this_ms << ',' << compute_ms
+          << ',' << sample.sequence << ',' << latest.sequence << ',';
+      if (!o.device.empty()) log << sample_age_ms;
+      log << ',';
+      if (o.drive && has_period) log << imu_interval_ms;
+      log << ',';
+      if (o.drive) log << phase_trim_ms;
+      log << '\n';
       log.flush();
       ensure(bool(log), "Control log failed");
       if (current.reached) {
@@ -816,7 +900,13 @@ int main(int argc, char **argv) {
                                  live_shadow ? "host_periodic_shadow" : "imu_sample_gated")
             << '\n';
     if (o.drive) {
-      summary << "drive_deadline_misses=" << drive_deadline_misses
+      summary << "drive_feedback_policy=buffered_phase_trim\n"
+              << "drive_buffered_selections=" << buffered_selections
+              << "\ndrive_phase_trims=" << phase_trims
+              << "\ndrive_phase_trim_sum_ms=" << phase_trim_sum_ms
+              << "\ndrive_phase_trim_max_abs_ms=" << phase_trim_max_abs_ms
+              << "\ndrive_sample_receipt_age_limit_ms=" << sample_age_limit * 1000
+              << "\ndrive_deadline_misses=" << drive_deadline_misses
               << "\ndrive_lateness_max_ms=" << drive_lateness_max_ms
               << "\ndrive_compute_max_ms=" << drive_compute_max_ms
               << "\nfeedback_count=" << feedback_count
@@ -850,6 +940,8 @@ int main(int argc, char **argv) {
               << name << "_max_ms=" << v.back() << '\n';
     };
     profile("period", period_times);
+    profile("drive_sample_receipt_age", sample_age_times);
+    profile("drive_feedback_interval", imu_interval_times);
     profile("control_compute", compute_times);
     profile("reference", reference_times);
     profile("feature", feature_times);

@@ -151,6 +151,47 @@ class Tests(unittest.TestCase):
    finally:
     if proc.poll() is None:proc.kill();proc.wait()
     os.close(master);os.close(slave)
+ def test_drive_faster_sensor_clock_phase_trim(self):
+  # Reproduce Pi/MCU relative drift: telemetry every 38 ms host, 40 ms MCU.
+  # A fixed 80 ms host schedule eventually skips a valid two-frame interval.
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d);args=setup(p);master,slave=pty.openpty()
+   os.set_blocking(master,False)
+   proc=subprocess.Popen([str(EXE),*args,'--device',os.ttyname(slave),
+    '--startup-discard-ms','0','--duration','2.6','--mode','fixed',
+    '--drive','--x0','0','--y0','0','--yaw0-deg','0'],
+    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    start=time.monotonic();first=start+.06;seq=1;buf=b'';last_seq=0
+    while proc.poll() is None and time.monotonic()-start<5:
+     now=time.monotonic();due=first+.038*(seq-1)
+     if now>=due and not(termios.tcgetattr(slave)[3]&termios.ICANON):
+      os.write(master,tel(seq,1000+40*(seq-1)));seq+=1
+     try:buf+=os.read(master,4096)
+     except BlockingIOError:pass
+     while b'\n' in buf:
+      line,buf=buf.split(b'\n',1);v=line.decode().strip().split(',')
+      if v[0]!='CTL':continue
+      req=int(v[2]);action=v[3]
+      if action!='STOP':last_seq=req
+      ms=1000+int((time.monotonic()-first)*40/.038)
+      os.write(master,wire(f'ACK,1,{req},{int(action!="STOP")},0,{ms},{last_seq}'))
+     time.sleep(.001)
+    out,err=proc.communicate(timeout=2);self.assertEqual(proc.returncode,0,out+err)
+    summary=dict(x.split('=',1) for x in (p/'out/summary.txt').read_text().splitlines())
+    self.assertEqual(summary['drive_feedback_policy'],'buffered_phase_trim')
+    self.assertEqual(summary['drive_deadline_misses'],'0')
+    rows=list(csv.DictReader(io.StringIO((p/'out/control.csv').read_text())))
+    self.assertGreater(len(rows),25)
+    self.assertTrue(all(float(b['imu_ms'])-float(a['imu_ms'])==80 for a,b in zip(rows,rows[1:])))
+    self.assertTrue(all(0<=float(x['sample_receipt_age_ms'])<=45 for x in rows))
+    self.assertLess(float(summary['drive_phase_trim_sum_ms']),0)
+    self.assertTrue(all(65<=float(x['period_ms'])<=95 for x in rows[1:]))
+    tx=[row.split(',')[3] for row in (p/'out/tx.log').read_text().splitlines()]
+    self.assertEqual(tx[-1],'STOP')
+   finally:
+    if proc.poll() is None:proc.kill();proc.wait()
+    os.close(master);os.close(slave)
  def test_drive_missing_ack_stops_and_never_sends_run(self):
   self.assertTrue(EXE.is_file(),'hardware_runner target missing')
   with tempfile.TemporaryDirectory() as d:

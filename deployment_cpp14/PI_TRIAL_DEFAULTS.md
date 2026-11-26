@@ -93,11 +93,17 @@ Giữ motor mất nguồn; chưa chạy Drive nếu chưa kiểm chứng lập l
 
 ## Kiểm chứng bộ lập lịch Drive (chưa xác nhận trên xe)
 
-Drive dùng mốc host định kỳ giống Shadow, nhưng không bỏ qua slot để chạy tiếp.
-Phải có ACK đúng sequence và mẫu IMU mới có read_start sau ACK. Khoảng thời gian
-MCU giữa hai mẫu feedback phải gần Ts (với Ts=80ms: 65..95ms). Nếu quá mốc slot
-10ms mà không có feedback phù hợp, dừng với drive_slot_deadline. Nếu khoảng
-feedback quá lớn, dừng drive_feedback_interval. Không dùng mẫu cũ hay chạy bù.
+Drive dùng mốc host định kỳ có hiệu chỉnh pha nhỏ theo feedback, không bỏ qua
+slot để chạy tiếp. Giữ 8 mẫu TEL2 và snapshot odometry tương ứng, chọn mẫu mới
+nhất thỏa điều kiện ACK đúng sequence, read_start sau ACK, khoảng IMU 65..95ms
+(Ts=80ms) và tuổi từ khi nhận trên host tối đa 45ms. Không tái sử dụng mẫu.
+Tuổi từ lúc nhận không phải tuổi tuyệt đối của dữ liệu cảm biến.
+Nếu không có mẫu hợp lệ khi quá mốc slot 10ms, dừng drive_slot_deadline;
+nếu đã vượt khoảng feedback, dừng drive_feedback_interval; nếu mẫu quá tuổi,
+dừng drive_feedback_stale. Không chạy bù. Hiệu chỉnh mốc tiếp theo theo
+tuổi mục tiêu 10ms, tối đa +/-5ms mỗi slot (có thêm giới hạn không xếp
+hai bước quá gần nhau). Ts mô hình giữ 80ms; chu kỳ host thực tế có thể
+khác 80ms do lệch đồng hồ. Phải đo lại trên Pi, không giả định đúng 80ms.
 Tính cả feedback/học, proposal, solver và ghi log trong ngân sách; dành 20ms
 cho ghi UART trước slot kế tiếp. Giữ nguyên watchdog và cơ chế STOP.
 Summary thêm scheduler=host_periodic_drive, drive_deadline_misses,
@@ -143,3 +149,17 @@ No updates in shadow; unavailable update/ACK summary metrics are omitted.
 Summary adds count, mean, p95 and max for each measured stage. Keep replay
 period blank because it is not real-time execution. Logs are not hard-real-time
 proof; profiling adds some overhead. Verify CTest and live shadow again.
+
+### Buffered feedback and phase trim
+
+Reproduces observed TEL2 seq 2183 -> 2185 (81 ms, valid) while latest 2186
+(122 ms, invalid) was already available. The selected pose/telemetry pair is
+used for both feedback and the next proposal; latest stays separate for health
+and liveness. control.csv adds selected_packet_seq, latest_packet_seq,
+sample_receipt_age_ms, feedback_interval_ms and drive_phase_trim_ms.
+Summary adds drive_feedback_policy=buffered_phase_trim, drive_buffered_selections,
+phase trim totals, sample receipt age and MCU feedback interval statistics.
+New PTY regression uses host 38ms vs MCU 40ms telemetry and must complete
+without invalid 120ms transitions. Old missing-feedback and safety tests remain.
+No changes to firmware, reward, Ts, Q/R/P, watchdog, ACK timeout or sample
+interval acceptance limits. Bench with motor and servo disconnected first.
