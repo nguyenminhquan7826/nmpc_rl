@@ -1,0 +1,22 @@
+{
+  "type": "BEST_DETERMINISTIC_FROZEN_TRAIN",
+  "episode_1based": 676,
+  "controller": "trained_episode_0676",
+  "criterion": "completed_and_solver_success_at_least_99_pct_then_min_post_1p3m_cte",
+  "mean_cte_post_m": 0.028201490359959915,
+  "max_cte_post_m": 0.05100586340491131,
+  "mean_reward_paper": -0.7613508052144371,
+  "solver_success_pct": 100.0,
+  "completion_pct": 99.56764713757931,
+  "candidate_episodes_evaluated": [
+    1,
+    10,
+    25,
+    50,
+    100,
+    676
+  ],
+  "not_global_best_over_all_episodes": true,
+  "reference_role": "TRAIN_ONLY",
+  "uses_TEST": false
+}
