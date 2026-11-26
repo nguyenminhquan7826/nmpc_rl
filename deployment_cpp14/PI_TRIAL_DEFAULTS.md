@@ -196,3 +196,34 @@ After confirming the earlier encoder/PID calibration still applies, use the
 short independent test described in HARDWARE_EXPERIMENT.md section 7. Build
 hardware_watchdog_check and run with motor AND servo disconnected. This is
 not a physical stop test; it exercises neutral CTL/ACK, silence and disarm.
+
+### Offline experimental analysis (Python only after the run)
+
+From deployment_cpp14 with the existing NumPy/pandas/matplotlib environment:
+
+```sh
+python tools/analyze_hardware.py --latest all --condition bench
+python tools/analyze_hardware.py --latest fixed --condition vehicle
+python tools/analyze_hardware.py hardware_runs/drive_fixed_<id> --condition vehicle
+```
+
+Use vehicle only after a genuine moving-vehicle experiment. Specify explicit
+run directories to select repeat trials or avoid mixing old/new versions;
+--latest selects the newest named directory including failures. Do not combine
+bench and vehicle in one invocation. No serial connection or controller calls.
+New output in hardware_analysis/ (or --output NEW_PATH), never overwrites.
+summary.csv, per-run metrics.json/derived_control.csv, tracking.png, weights.png,
+timing.png, learning.png (if transitions exist), comparison.png (multiple runs),
+comparison_checks.json. --no-plots produces CSV/JSON only.
+CTE is the logged RouteTracker distance, heading uses wrapped yaw difference
+against reference2, speed error against reference0; all odometry based.
+Reward/TD only from observed transitions, not proposals. Mean reward and
+active duration reported separately; total reward not comparable across
+different lengths. No ground truth; no ranking or automatic performance claim.
+Old logs lacking active_duration_s use first RUN to next STOP if present.
+Steering is proposed/quantized, not measured. Successful solve timing excludes
+terminal unsolved proposals. Control timing uses all logged control rows.
+No actual vehicle/AprilTag validation implied. P95 derived from raw samples
+uses NumPy linear interpolation, which differs slightly from native floor-index
+P95. Matching snapshot hashes do not verify physical starting pose or repeatability.
+Regression: python tests/test_analyze_hardware.py
