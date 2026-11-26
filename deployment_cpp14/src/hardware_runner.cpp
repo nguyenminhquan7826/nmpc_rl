@@ -25,12 +25,12 @@ double seconds(Clock::time_point t) {
 }
 struct Serial {
   int fd = -1;
-  bool drive = false, owned = false;
+  bool drive = false, owned = false, stop_confirmed = false;
   std::uint32_t sequence = 0;
   std::ofstream *tx = nullptr;
   ~Serial() {
     if (fd >= 0) {
-      if (drive && owned) {
+      if (drive && owned && !stop_confirmed) {
         try {
           send(command_frame(++sequence, "STOP", 0, 75));
         } catch (...) {
@@ -135,6 +135,7 @@ struct Options {
   bool drive = false, keyboard = false, x = false, y = false, yaw = false;
   double x0 = 0, y0 = 0, yaw0 = 0, duration = 60, discard_ms = 1000;
   unsigned seed = 0;
+  double start_timeout = 60;
 };
 Options options(int argc, char **argv) {
   Options o;
@@ -181,6 +182,8 @@ Options options(int argc, char **argv) {
         o.duration = n;
       else if (a == "--startup-discard-ms")
         o.discard_ms = n;
+      else if (a == "--start-timeout")
+        o.start_timeout = n;
       else if (a == "--seed") {
         ensure(n >= 0 && n <= 2147483647 && std::floor(n) == n, "Invalid seed");
         o.seed = static_cast<unsigned>(n);
@@ -203,8 +206,9 @@ Options options(int argc, char **argv) {
          "Drive requires serial and explicit x0/y0/yaw0-deg");
   ensure(!o.keyboard || o.drive, "--keyboard requires --drive");
   ensure(o.duration > 0 && o.duration <= 3600 && o.discard_ms >= 0 &&
-             o.discard_ms <= 10000,
-         "Invalid duration/discard");
+             o.discard_ms <= 10000 && o.start_timeout > 0 &&
+             o.start_timeout <= 600,
+         "Invalid duration/discard/start-timeout");
   return o;
 }
 std::string default_output(const Options &o) {
@@ -237,7 +241,8 @@ int main(int argc, char **argv) {
                    "Defaults: hardware_trial_inputs/{initial.model,hardware.settings,reference.csv},\n"
                    "/dev/ttyACM0, duration 60s, seed 0, new hardware_runs directory.\n"
                    "Options: --model --settings --reference --output --device --input\n"
-                   "         --duration --seed --startup-discard-ms\n"
+                   "         --duration --seed --startup-discard-ms --start-timeout\n"
+                   "Drive duration starts at first RUN, start timeout defaults to 60s.\n"
                    "Shadow by default. Drive requires --drive and explicit\n"
                    "--x0 X --y0 Y --yaw0-deg DEG; shorthand drive waits for r, q stops.\n"
                    "Use --keyboard for explicit drive. No replay drive.\n";
@@ -371,6 +376,19 @@ int main(int argc, char **argv) {
     std::deque<Sample> drive_samples;
     HardwareStep current;
     auto last_host = Clock::now(), sent_at = Clock::now();
+    const auto startup_begin = Clock::now();
+    auto active_begin = Clock::time_point{};
+    const auto active_started = [&]() {
+      return active_begin != Clock::time_point{};
+    };
+    const auto active_elapsed = [&]() {
+      return active_started() ? seconds(active_begin) : 0.0;
+    };
+    const auto time_remaining = [&]() {
+      if (!o.drive) return seconds(origin) < o.duration;
+      return active_started() ? active_elapsed() < o.duration
+                              : seconds(startup_begin) < o.start_timeout;
+    };
     // Shadow remains phase-locked to a fixed host clock. Drive trims the
     // host phase toward eligible sensor arrivals to avoid accumulating drift.
     const bool live_shadow = !o.drive && !o.device.empty();
@@ -628,7 +646,9 @@ int main(int argc, char **argv) {
         auto after = static_cast<std::uint32_t>(sample.read_start_ms - ack_ms);
         if (after == 0 || after >= 0x80000000U)
           return;
-        bool truncating = seconds(origin) + session.period() >= o.duration;
+        // Complete the last acknowledged transition without sending a RUN
+        // that would extend beyond the requested active duration.
+        bool truncating = active_elapsed() + session.period() >= o.duration;
         const auto feedback_begin = Clock::now();
         auto update = session.feedback(control_pose, false, truncating);
         const double feedback_ms =
@@ -795,10 +815,20 @@ int main(int argc, char **argv) {
         }
         if (check_keyboard())
           return;
-        if (seconds(origin) >= o.duration) {
-          session.cancel();
-          reason = "duration_completed";
+        if (!time_remaining()) {
+          if (active_started()) {
+            session.cancel();
+            reason = "duration_completed";
+          } else {
+            stop("start_timeout");
+          }
           return;
+        }
+        // Start the active clock immediately before the first RUN write.
+        // Startup discard, STOP/ARM synchronization and operator wait are excluded.
+        if (!active_started()) {
+          active_begin = Clock::now();
+          event("active_start", expected + 1U, "first_run");
         }
         transmit("RUN", current.command.speed, current.command.servo);
         if (Clock::now() >= drive_next) {
@@ -813,8 +843,7 @@ int main(int argc, char **argv) {
       }
     };
     try {
-      while (!interrupted && reason == "completed" &&
-             seconds(origin) < o.duration) {
+      while (!interrupted && reason == "completed" && time_remaining()) {
         if (port.fd >= 0) {
           pollfd p{port.fd, POLLIN, 0};
           int ready = ::poll(&p, 1, 2);
@@ -873,17 +902,84 @@ int main(int argc, char **argv) {
         reason = "no_healthy_telemetry";
         exit_code = 2;
       }
+      if (o.drive && reason == "completed") {
+        if (active_started())
+          reason = "duration_completed";
+        else {
+          reason = "start_timeout";
+          exit_code = 2;
+        }
+      }
     } catch (const std::exception &e) {
       reason = "runtime_error";
       exit_code = 2;
       event("exception", latest.sequence, e.what());
     }
+    // Do not run the controller or learn during shutdown. Keep the original
+    // termination reason; final STOP status and exit code are independent.
+    const double active_duration_s = active_elapsed();
     session.cancel();
+    std::string final_stop_status = "not_applicable";
+    double final_stop_ack_wait_ms = 0;
+    std::uint32_t final_stop_seq = 0;
     if (o.drive) {
+      final_stop_status = "write_failed";
       try {
         transmit("STOP", 0, 75);
+        final_stop_seq = expected;
+        final_stop_status = "ack_timeout";
+        // Continue the existing stream framing, but parse only ACK.
+        // Never re-enter consume(), tick(), or send ARM/RUN in shutdown.
+        while (!port.stop_confirmed && seconds(sent_at) < ack_timeout) {
+          pollfd p{port.fd, POLLIN, 0};
+          const int ready = ::poll(&p, 1, 2);
+          if (ready < 0 && errno == EINTR) continue;
+          ensure(ready >= 0 && !(p.revents & (POLLERR | POLLHUP | POLLNVAL)),
+                 "Serial disconnected during STOP confirmation");
+          if (!(p.revents & POLLIN)) continue;
+          char bytes[4096];
+          const auto count = ::read(port.fd, bytes, sizeof(bytes));
+          if (count < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+          ensure(count > 0, "STOP ACK read failed");
+          raw.write(bytes, count);
+          raw.flush();
+          ensure(bool(raw), "STOP RX log failed");
+          for (ssize_t i = 0; i < count; ++i) {
+            const char c = bytes[i];
+            if (c == '\n') {
+              Ack ack{};
+              if (!line_overflow && parse_ack(buffer, ack) &&
+                  ack.seq == final_stop_seq && seconds(sent_at) <= ack_timeout) {
+                final_stop_ack_wait_ms = elapsed_ms(sent_at);
+                event("ack", ack.seq, std::to_string(ack.reason) + "_armed_" +
+                                         std::to_string(ack.armed));
+                if (ack.reason == 0 && !ack.armed) {
+                  port.stop_confirmed = true;
+                  final_stop_status = "confirmed";
+                } else if (!port.stop_confirmed) {
+                  final_stop_status = "rejected_or_armed";
+                }
+              }
+              buffer.clear();
+              line_overflow = false;
+            } else if (c != '\r' && !line_overflow) {
+              if (buffer.size() < 512) buffer += c;
+              else {
+                buffer.clear();
+                line_overflow = true;
+              }
+            }
+          }
+        }
       } catch (const std::exception &e) {
-        event("stop_write_failed", 0, e.what());
+        if (!port.stop_confirmed && final_stop_status != "write_failed")
+          final_stop_status = "read_failed";
+        event("stop_confirmation_exception", final_stop_seq, e.what());
+      }
+      event("final_stop", final_stop_seq, final_stop_status);
+      if (!port.stop_confirmed) {
+        // Destructor makes one best-effort STOP retry. MCU watchdog and
+        // independent power cutoff remain necessary; never report success.
         exit_code = 2;
       }
     }
@@ -900,7 +996,18 @@ int main(int argc, char **argv) {
                                  live_shadow ? "host_periodic_shadow" : "imu_sample_gated")
             << '\n';
     if (o.drive) {
-      summary << "drive_feedback_policy=buffered_phase_trim\n"
+      summary << "requested_active_duration_s=" << o.duration
+              << "\nstart_timeout_s=" << o.start_timeout
+              << "\nactive_started=" << active_started()
+              << "\nactive_start_host_s="
+              << (active_started() ? std::chrono::duration<double>(active_begin - origin).count() : 0)
+              << "\nactive_duration_s=" << active_duration_s
+              << "\nfinal_stop_seq=" << final_stop_seq
+              << "\nfinal_stop_status=" << final_stop_status
+              << "\nfinal_stop_confirmed=" << port.stop_confirmed
+              << "\nfinal_stop_ack_wait_ms=" << final_stop_ack_wait_ms
+              << "\nexit_code=" << exit_code
+              << "\ndrive_feedback_policy=buffered_phase_trim\n"
               << "drive_buffered_selections=" << buffered_selections
               << "\ndrive_phase_trims=" << phase_trims
               << "\ndrive_phase_trim_sum_ms=" << phase_trim_sum_ms
@@ -958,7 +1065,9 @@ int main(int argc, char **argv) {
     ensure(bool(summary) && bool(raw) && bool(states),
            "Final log write failed");
     std::cerr << "Hardware runner: " << reason << " steps=" << step
-              << " drive=" << o.drive << '\n';
+              << " drive=" << o.drive;
+    if (o.drive) std::cerr << " final_stop=" << final_stop_status;
+    std::cerr << '\n';
     return exit_code;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

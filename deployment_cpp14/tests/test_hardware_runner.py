@@ -276,10 +276,66 @@ class Tests(unittest.TestCase):
     self.assertEqual(tx[:3],['STOP','ARM','RUN'])
     self.assertTrue(tx[3:] and set(tx[3:])=={'STOP'})
     self.assertIn('reason=operator_stop',(p/'out/summary.txt').read_text())
+    self.assertIn('final_stop_confirmed=1',(p/'out/summary.txt').read_text())
     self.assertEqual(termios.tcgetattr(terminal),original)
    finally:
     if proc.poll() is None:proc.kill();proc.wait()
     for fd in (master,slave,keys,terminal):os.close(fd)
+ def test_active_duration_and_final_stop_ack(self):
+  # Wait longer than requested active duration before pressing r.
+  # Verify duration is independent of startup and final STOP must be ACKed.
+  for stop_reply in ('valid','missing','armed','wrong_seq'):
+   with self.subTest(stop_reply=stop_reply),tempfile.TemporaryDirectory() as d:
+    p=Path(d);args=setup(p);master,slave=pty.openpty();keys,terminal=pty.openpty()
+    os.set_blocking(master,False)
+    proc=subprocess.Popen([str(EXE),*args,'--device',os.ttyname(slave),
+     '--startup-discard-ms','0','--duration','.65','--start-timeout','3',
+     '--drive','--keyboard','--x0','0','--y0','0','--yaw0-deg','0'],
+     stdin=terminal,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+     start=time.monotonic();next_tel=start;seq=1;buf=b'';actions=[];last_seq=0
+     pressed=False;run_times=[];stop_times=[]
+     while proc.poll() is None and time.monotonic()-start<5:
+      now=time.monotonic();ms=1000+int((now-start)*1000)
+      if now>=next_tel and actions:
+       os.write(master,tel(seq,ms));seq+=1;next_tel=now+.04
+      if now-start>.9 and not pressed:
+       self.assertEqual(actions,['STOP']);os.write(keys,b'r');pressed=True
+      try:buf+=os.read(master,4096)
+      except BlockingIOError:pass
+      while b'\n' in buf:
+       line,buf=buf.split(b'\n',1);v=line.decode().strip().split(',')
+       if v[0]!='CTL':continue
+       req=int(v[2]);action=v[3];actions.append(action)
+       if action!='STOP':last_seq=req
+       if action=='RUN':run_times.append(now)
+       armed=int(action!='STOP')
+       if action=='STOP' and len(actions)>1:
+        stop_times.append(now)
+        if stop_reply=='missing':continue
+        if stop_reply=='armed':armed=1
+        if stop_reply=='wrong_seq':req=(req-1)&0xffffffff
+       os.write(master,wire(f'ACK,1,{req},{armed},0,{ms},{last_seq}'))
+      time.sleep(.001)
+     out,err=proc.communicate(timeout=2)
+     self.assertEqual(proc.returncode,0 if stop_reply=='valid' else 2,out+err)
+     summary=dict(x.split('=',1) for x in (p/'out/summary.txt').read_text().splitlines())
+     self.assertEqual(summary['reason'],'duration_completed')
+     self.assertEqual(summary['active_started'],'1')
+     self.assertGreater(float(summary['active_start_host_s']),.65)
+     self.assertTrue(.55<=float(summary['active_duration_s'])<=.67,summary)
+     self.assertGreaterEqual(len(run_times),6)
+     self.assertTrue(stop_times)
+     self.assertEqual(summary['final_stop_confirmed'],str(int(stop_reply=='valid')))
+     self.assertEqual(summary['final_stop_status'],{'valid':'confirmed','missing':'ack_timeout','armed':'rejected_or_armed','wrong_seq':'ack_timeout'}[stop_reply])
+     tx=[row.split(',')[3] for row in (p/'out/tx.log').read_text().splitlines()]
+     self.assertEqual(tx[:2],['STOP','ARM'])
+     first_stop=tx.index('STOP',2)
+     self.assertTrue(all(x=='STOP' for x in tx[first_stop:]))
+     if stop_reply=='valid':self.assertEqual(len(tx[first_stop:]),1)
+    finally:
+     if proc.poll() is None:proc.kill();proc.wait()
+     for fd in (master,slave,keys,terminal):os.close(fd)
  def test_busy_serial_is_never_written_by_second_owner(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d);args=setup(p);master,slave=pty.openpty()

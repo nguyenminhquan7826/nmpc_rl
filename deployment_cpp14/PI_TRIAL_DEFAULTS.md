@@ -163,3 +163,29 @@ New PTY regression uses host 38ms vs MCU 40ms telemetry and must complete
 without invalid 120ms transitions. Old missing-feedback and safety tests remain.
 No changes to firmware, reward, Ts, Q/R/P, watchdog, ACK timeout or sample
 interval acceptance limits. Bench with motor and servo disconnected first.
+
+### Active duration and confirmed shutdown
+
+Drive --duration now measures active host time from immediately before the
+first RUN, excluding initial STOP/ARM and keyboard wait. A separate
+--start-timeout (default 60s, max 600s) bounds pre-RUN waiting after startup
+discard. Shadow and replay duration semantics are unchanged. A duration-limited
+trial can stop up to one nominal Ts early to finish the last valid transition;
+route completion, q, signal or faults may stop earlier. All safety deadlines
+and watchdog behavior are unchanged.
+
+On exit from the control loop, cancel pending proposals, send STOP, and
+read for at most the configured ACK timeout. Validate CRC, matching STOP
+sequence, reason=0 and armed=0. No controller calls or ARM/RUN while waiting.
+A missing/rejected/incorrect ACK produces nonzero exit even on duration
+completion; retain original reason and record final_stop_status separately.
+If STOP was not confirmed the serial destructor makes a best-effort STOP
+retry (not a confirmed retry). Confirmed STOP is not resent by the destructor.
+ACK confirms command guard acceptance/disarmed, NOT measured motor stop.
+The independent cutoff and MCU watchdog remain required.
+
+summary.txt adds requested_active_duration_s, start_timeout_s, active_started,
+active_start_host_s, active_duration_s (excludes STOP confirmation), final_stop_seq,
+final_stop_status, final_stop_confirmed, final_stop_ack_wait_ms and exit_code.
+Regression covers delayed keyboard start, valid STOP ACK, missing ACK, wrong
+sequence and armed ACK. Keep motor and servo supply disconnected for retest.
