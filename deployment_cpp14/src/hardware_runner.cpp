@@ -333,6 +333,14 @@ int main(int argc, char **argv) {
     HardwareStep current;
     auto last_host = Clock::now(), sent_at = Clock::now(),
          last_step_at = Clock::now();
+    // Live shadow uses a phase-locked host clock. Drive/replay keep their
+    // original sensor/ACK timing until the new schedule is validated on Pi.
+    const bool live_shadow = !o.drive && !o.device.empty();
+    const auto shadow_period = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(session.period()));
+    auto shadow_next = Clock::time_point{};
+    std::size_t shadow_missed_slots = 0;
+    double shadow_lateness_max_ms = 0;
     std::vector<double> solve_times;
     std::string reason = "completed", buffer;
     bool line_overflow = false;
@@ -469,7 +477,13 @@ int main(int argc, char **argv) {
         return;
       if (have_step && latest.imu_ms == last_imu)
         return;
-      if (have_step) {
+      if (live_shadow && have_step) {
+        // Never require MCU timestamps to differ by exactly Ts: 79 ms of
+        // sensor progress must not force a further 40 ms wait on the host.
+        if (Clock::now() < shadow_next)
+          return;
+      }
+      if (have_step && !live_shadow) {
         const auto delta =
             static_cast<std::uint32_t>(latest.imu_ms - last_imu) * .001;
         if (delta + 1e-6 < session.period())
@@ -509,6 +523,22 @@ int main(int argc, char **argv) {
         }
       }
       auto start = Clock::now();
+      if (live_shadow) {
+        if (!have_step) {
+          shadow_next = start + shadow_period;
+        } else {
+          const double late_ms =
+              std::chrono::duration<double, std::milli>(start - shadow_next).count();
+          shadow_lateness_max_ms = std::max(shadow_lateness_max_ms, late_ms);
+          shadow_next += shadow_period;
+          // Skip overdue slots (and slots too close to a late execution).
+          // Never execute multiple steps in a burst to catch up.
+          while (shadow_next <= start + shadow_period / 2) {
+            shadow_next += shadow_period;
+            ++shadow_missed_slots;
+          }
+        }
+      }
       current = session.propose(pose);
       solve_times.push_back(current.solve_ms);
       step++;
@@ -650,7 +680,13 @@ int main(int argc, char **argv) {
             << "\nrejected_samples=" << rejected << "\ncontrol_steps=" << step
             << "\nactor_updates=" << session.actor_updates()
             << "\ncritic_updates=" << session.critic_updates()
-            << "\nvy_assumed_zero=1\nkalman_used=0\n";
+            << "\nvy_assumed_zero=1\nkalman_used=0\n"
+            << "scheduler=" << (live_shadow ? "host_periodic_shadow" : "imu_sample_gated")
+            << '\n';
+    if (live_shadow) {
+      summary << "shadow_missed_slots=" << shadow_missed_slots
+              << "\nshadow_lateness_max_ms=" << shadow_lateness_max_ms << '\n';
+    }
     if (!solve_times.empty()) {
       std::sort(solve_times.begin(), solve_times.end());
       double sum = 0;

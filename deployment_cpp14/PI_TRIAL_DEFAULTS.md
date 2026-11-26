@@ -80,3 +80,13 @@ xe thật chỉ bằng CTest.
 
 Launcher không sửa thuật toán C++, firmware hay thông số học; Python chỉ
 chuẩn bị dữ liệu và gọi binary, không tham gia vòng điều khiển.
+
+## Kiểm chứng chu kỳ điều khiển Shadow
+
+Live shadow dùng mốc steady_clock của Pi, chu kỳ lấy từ hardware.settings,
+không đợi chênh timestamp MCU >= Ts. Mỗi bước vẫn cần mẫu IMU mới; nếu trễ,
+bỏ qua slot đã quá hạn/slot quá gần, không chạy bù. Replay và Drive vẫn giữ
+lập lịch cũ; không dùng kết quả shadow để tuyên bố Drive đã đạt 80 ms.
+Kiểm tra scheduler=host_periodic_shadow, shadow_missed_slots,
+shadow_lateness_max_ms trong summary.txt và host_s trong control.csv.
+Giữ motor mất nguồn; chưa chạy Drive nếu chưa kiểm chứng lập lịch ACK/feedback.

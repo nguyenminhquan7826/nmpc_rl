@@ -48,6 +48,38 @@ class Tests(unittest.TestCase):
    finally:
     if proc.poll() is None:proc.kill();proc.wait()
     os.close(master);os.close(slave)
+ def test_live_shadow_host_period_not_gated_by_imu_clock(self):
+  # Two 39 ms MCU increments are <80 ms, though frames arrive every 40 ms
+  # on the host. The old gate forced three frames per control step.
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d);args=setup(p);master,slave=pty.openpty()
+   proc=subprocess.Popen([str(EXE),*args,'--device',os.ttyname(slave),
+     '--startup-discard-ms','0','--duration','1.5'],
+     stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    deadline=time.monotonic()+3
+    while termios.tcgetattr(slave)[3]&termios.ICANON:
+     self.assertLess(time.monotonic(),deadline);time.sleep(.005)
+    start=time.monotonic();seq=1
+    while proc.poll() is None and time.monotonic()-start<3:
+     if time.monotonic()>=start+.04*(seq-1):
+      os.write(master,tel(seq,1000+39*(seq-1)));seq+=1
+     time.sleep(.001)
+    out,err=proc.communicate(timeout=3);self.assertEqual(proc.returncode,0,out+err)
+    summary=dict(x.split('=',1) for x in (p/'out/summary.txt').read_text().splitlines())
+    self.assertEqual(summary['scheduler'],'host_periodic_shadow')
+    self.assertEqual(summary['actor_updates'],'0');self.assertEqual(summary['critic_updates'],'0')
+    self.assertEqual((p/'out/tx.log').read_bytes(),b'')
+    rows=list(csv.DictReader(io.StringIO((p/'out/control.csv').read_text())))
+    self.assertGreaterEqual(len(rows),12)
+    dt=[float(b['imu_ms'])-float(a['imu_ms']) for a,b in zip(rows,rows[1:])]
+    self.assertTrue(all(v>0 for v in dt),'stale sample reused')
+    self.assertGreater(sum(v<=80 for v in dt),len(dt)//2,dt)
+    period=(float(rows[-1]['host_s'])-float(rows[0]['host_s']))/(len(rows)-1)
+    self.assertLess(period,.095)
+   finally:
+    if proc.poll() is None:proc.kill();proc.wait()
+    os.close(master);os.close(slave)
  def test_drive_missing_ack_stops_and_never_sends_run(self):
   self.assertTrue(EXE.is_file(),'hardware_runner target missing')
   with tempfile.TemporaryDirectory() as d:
