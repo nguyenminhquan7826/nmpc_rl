@@ -16,6 +16,33 @@ def wire(p):return (p+f',{binascii.crc_hqx(p.encode(),0xffff):04X}\r\n').encode(
 def tel(seq,ms,error=0):
  return wire(f'TEL,2,{seq},{ms},{seq},{ms},0,0,0,75,0,{seq},{ms-2},0,0,0,0,34,3,0,0,0,0,{ms-7},{ms-2},10,5,{error}')
 class Tests(unittest.TestCase):
+ def test_native_shorthand_replay_and_profile(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d);setup(p)
+   inputs=p/'hardware_trial_inputs';inputs.mkdir()
+   for old,new in [('model','initial.model'),('settings','hardware.settings'),('route.csv','reference.csv')]:
+    (inputs/new).write_bytes((p/old).read_bytes())
+   (p/'raw.log').write_bytes(b''.join(tel(i+1,1000+40*i) for i in range(10)))
+   exe=str(EXE.resolve())
+   r=subprocess.run([exe,'--mode','fixed','--input','raw.log'],cwd=p,capture_output=True,text=True)
+   self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+   out=list((p/'hardware_runs').glob('replay_fixed_*'))
+   self.assertEqual(len(out),1)
+   self.assertEqual((out[0]/'tx.log').read_bytes(),b'')
+   rows=list(csv.DictReader(io.StringIO((out[0]/'control.csv').read_text())))
+   self.assertTrue(rows)
+   for row in rows:
+    for field in ['reference_ms','feature_ms','actor_proposal_ms','warm_start_ms','command_mapping_ms','proposal_total_ms','control_compute_ms']:
+     self.assertTrue(math.isfinite(float(row[field])) and float(row[field])>=0,field)
+    self.assertEqual(row['period_ms'],'') # replay is not live timing
+   summary=(out[0]/'summary.txt').read_text()
+   self.assertIn('actor_proposal_mean_ms=',summary)
+   self.assertIn('control_compute_max_ms=',summary)
+   self.assertNotIn('actor_update_mean_ms=',summary)
+   r=subprocess.run([exe,'--mode','fixed','--drive'],cwd=p,capture_output=True,text=True)
+   self.assertNotEqual(r.returncode,0)
+   self.assertIn('explicit x0/y0/yaw0-deg',r.stderr)
+   self.assertEqual(len(list((p/'hardware_runs').iterdir())),1)
  def test_native_session_contract(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d);setup(p)
@@ -161,6 +188,12 @@ class Tests(unittest.TestCase):
      summary=(p/'out/summary.txt').read_text();self.assertIn('reason=fusion_unhealthy',summary);self.assertGreaterEqual(run_count,3)
      updates=int(dict(x.split('=',1) for x in summary.splitlines())['critic_updates'])
      self.assertEqual(updates>0,mode in ['critic_adapt','full_adapt'])
+     self.assertIn('run_ack_wait_mean_ms=',summary)
+     transitions=list(csv.DictReader(io.StringIO((p/'out/transitions.csv').read_text())))
+     self.assertTrue(transitions)
+     for row in transitions:
+      for key in ('feedback_ms','observe_total_ms','actor_update_ms','critic_evaluate_ms','critic_update_ms','run_ack_wait_ms'):
+       self.assertTrue(math.isfinite(float(row[key])) and float(row[key])>=0,key)
      self.assertEqual((p/'out/tx.log').read_text().strip().splitlines()[-1].split(',')[3],'STOP')
     finally:
      if proc.poll() is None:proc.kill();proc.wait()

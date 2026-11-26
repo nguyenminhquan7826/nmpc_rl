@@ -60,8 +60,11 @@ HardwareSession::HardwareSession(const Numbers &m, const Numbers &c,
 HardwareStep HardwareSession::propose(const Pose &p) {
   ensure(!proposed_, "Previous real proposal unresolved");
   auto x = state(p);
+  using Clock = std::chrono::steady_clock;
+  auto begin_reference = Clock::now();
   auto ref = tracker_.get(p.x, p.y, ts_, n_);
   auto xr = section(ref.states, 0, 6);
+  auto begin_features = Clock::now();
   std::vector<double> meta{ref.projection.s,
                            path_.start(),
                            end_,
@@ -72,10 +75,18 @@ HardwareStep HardwareSession::propose(const Pose &p) {
                            path_.rows().front().state[2],
                            scalar(config_, "feature_length")};
   auto obs = actor_features(x, xr, previous_, meta);
+  auto begin_actor = Clock::now();
   auto proposal = controller_.propose(obs);
+  auto end_actor = Clock::now();
   proposed_ = true;
   accepted_ = false;
   step_ = {};
+  auto ms = [](Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  step_.reference_ms = ms(begin_reference, begin_features);
+  step_.feature_ms = ms(begin_features, begin_actor);
+  step_.actor_proposal_ms = ms(begin_actor, end_actor);
   step_.state = x;
   step_.reference = xr;
   step_.error = state_error(x, xr);
@@ -91,6 +102,7 @@ HardwareStep HardwareSession::propose(const Pose &p) {
   step_.reached = ref.projection.s >= end_ - .03;
   if (step_.reached)
     return step_;
+  auto begin_warm_start = Clock::now();
   if (guess_.empty()) {
     auto predicted = x;
     std::vector<double> controls;
@@ -101,7 +113,8 @@ HardwareStep HardwareSession::propose(const Pose &p) {
     }
     extend(guess_, controls);
   }
-  auto begin = std::chrono::steady_clock::now();
+  auto begin = Clock::now();
+  step_.warm_start_ms = ms(begin_warm_start, begin);
   solver_->set_step(x, previous_, ref.states, guess_, proposal.q, proposal.r,
                     proposal.p);
   auto result = solver_->evaluate_and_solve();
@@ -112,6 +125,7 @@ HardwareStep HardwareSession::propose(const Pose &p) {
   if (step_.success) {
     step_.control = result.at("control");
     guess_ = result.at("shifted");
+    auto begin_mapping = Clock::now();
     step_.command = hardware_command(
         p.vx, step_.control[0], step_.control[1], ts_, drag_, limits_,
         std::max(config_.at("input_lower")[1],
@@ -128,6 +142,7 @@ HardwareStep HardwareSession::propose(const Pose &p) {
           change > config_.at("du_upper")[j] + 1e-5)
         step_.command.clipped = true;
     }
+    step_.command_mapping_ms = ms(begin_mapping, Clock::now());
   }
   return step_;
 }

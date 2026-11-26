@@ -1,4 +1,11 @@
 #include "online_controller.hpp"
+#include <chrono>
+namespace {
+using ProfileClock = std::chrono::steady_clock;
+double profile_ms(ProfileClock::time_point t) {
+  return std::chrono::duration<double, std::milli>(ProfileClock::now() - t).count();
+}
+}
 namespace deployment {
 OnlineController::OnlineController(const Numbers &m, Mode mode, unsigned long long seed)
     : model_(m), actor_(m), critic_(m), mode_(mode), rng_(seed) {
@@ -43,9 +50,11 @@ OnlineUpdate OnlineController::observe(const std::vector<double> &error,
                                        const std::vector<double> &next_error, double reward,
                                        bool terminal, bool truncated) {
   // Whole transition is transactional, including delayed batch buffers/counters.
+  const auto begin = ProfileClock::now();
   auto candidate = *this;
   auto result = candidate.observe_impl(error, next_error, reward, terminal, truncated);
   *this = std::move(candidate);
+  result.observe_total_ms = profile_ms(begin);
   return result;
 }
 OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
@@ -53,13 +62,17 @@ OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
                                             bool terminal, bool truncated) {
   ensure(waiting_ && !finished_, "No pending action to learn from");
   // Validate even fixed-mode feedback; Critic evaluates a candidate before mutation.
+  const auto critic_begin = ProfileClock::now();
   auto step = critic_.evaluate(e, en, reward, terminal);
   OnlineUpdate out;
+  out.critic_evaluate_ms = profile_ms(critic_begin);
   if (mode_ != Mode::Fixed) {
     out.td = step.td;
     if (adapt_actor()) {
       if (horizon_ == 1) {
+        const auto begin = ProfileClock::now();
         out.actor_step_norm = actor_.apply(actor_.gradients(obs_, latent_, {step.td}));
+        out.actor_update_ms = profile_ms(begin);
         out.batch_size = 1;
         ++actor_updates_;
         ++actor_samples_;
@@ -72,6 +85,7 @@ OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
         rewards_.push_back(reward);
         auto collect = static_cast<std::size_t>(full_ ? 2 * horizon_ - 1 : horizon_);
         if (rewards_.size() >= collect || terminal || truncated) {
+          const auto begin = ProfileClock::now();
           out.returns =
               advantages(rewards_, errors_, en, snapshot_, gamma_, terminal, horizon_, full_);
           std::size_t count = out.returns.advantages.size();
@@ -83,6 +97,7 @@ OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
             ++actor_updates_;
             actor_samples_ += count;
           }
+          out.actor_update_ms = count ? profile_ms(begin) : 0;
           pending_obs_.clear();
           pending_latent_.clear();
           errors_.clear();
@@ -92,6 +107,7 @@ OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
       }
     }
     if (adapt_critic()) {
+      const auto begin = ProfileClock::now();
       double norm = 0;
       for (int j = 0; j < 6; ++j) {
         double d = step.after[j] - critic_.p()[j];
@@ -100,6 +116,7 @@ OnlineUpdate OnlineController::observe_impl(const std::vector<double> &e,
       out.critic_step_norm = std::sqrt(norm);
       critic_.apply(step);
       ++critic_updates_;
+      out.critic_update_ms = profile_ms(begin);
     }
   }
   waiting_ = false;

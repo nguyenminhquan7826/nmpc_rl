@@ -10,6 +10,9 @@ struct OnlineUpdate {
   double td = 0, actor_step_norm = 0, critic_step_norm = 0;
   std::size_t batch_size = 0;
   Returns returns;
+  // Actual gradient/apply timings; zero when a stage did not run.
+  double actor_update_ms = 0, critic_evaluate_ms = 0, critic_update_ms = 0;
+  double observe_total_ms = 0;
 };
 class OnlineController {
 public:

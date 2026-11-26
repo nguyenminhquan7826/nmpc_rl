@@ -11,6 +11,8 @@ struct HardwareStep {
   HardwareCommand command{};
   double progress = 0, cte = 0, solve_ms = 0;
   bool success = false, reached = false;
+  double reference_ms = 0, feature_ms = 0, actor_proposal_ms = 0,
+         command_mapping_ms = 0, warm_start_ms = 0;
 };
 class HardwareSession {
   Numbers config_;

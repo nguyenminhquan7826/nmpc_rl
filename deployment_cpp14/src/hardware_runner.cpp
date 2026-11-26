@@ -1,4 +1,5 @@
 #include "hardware_session.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -186,10 +187,15 @@ Options options(int argc, char **argv) {
         throw std::invalid_argument("Unknown option: " + a);
     }
   }
-  ensure(!o.model.empty() && !o.settings.empty() && !o.reference.empty() &&
-             !o.output.empty(),
-         "Required: --model --settings --reference --output; plus --device or "
-         "--input; default is shadow");
+  const bool shorthand = o.model.empty() || o.settings.empty() ||
+      o.reference.empty() || o.output.empty() ||
+      (o.device.empty() && o.input.empty());
+  if (o.model.empty()) o.model = "hardware_trial_inputs/initial.model";
+  if (o.settings.empty()) o.settings = "hardware_trial_inputs/hardware.settings";
+  if (o.reference.empty()) o.reference = "hardware_trial_inputs/reference.csv";
+  if (o.device.empty() && o.input.empty()) o.device = "/dev/ttyACM0";
+  // Preserve explicit legacy/PTY CLI; shorthand drive always waits for r.
+  if (o.drive && shorthand) o.keyboard = true;
   ensure(o.device.empty() != o.input.empty(),
          "Choose exactly one device or replay input");
   ensure(!o.drive || (!o.device.empty() && o.x && o.y && o.yaw),
@@ -199,6 +205,19 @@ Options options(int argc, char **argv) {
              o.discard_ms <= 10000,
          "Invalid duration/discard");
   return o;
+}
+std::string default_output(const Options &o) {
+  const std::string parent = "hardware_runs";
+  if (::mkdir(parent.c_str(), 0755) != 0) {
+    ensure(errno == EEXIST, "Cannot create hardware_runs");
+    struct stat st{};
+    ensure(::stat(parent.c_str(), &st) == 0 && S_ISDIR(st.st_mode),
+           "hardware_runs is not a directory");
+  }
+  const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  return parent + "/" + (o.drive ? "drive_" : o.input.empty() ? "shadow_" : "replay_")
+      + o.mode + "_" + std::to_string(stamp) + "_" + std::to_string(::getpid());
 }
 void copy_file(const std::string &a, const std::string &b) {
   std::ifstream in(a, std::ios::binary);
@@ -211,7 +230,18 @@ void copy_file(const std::string &a, const std::string &b) {
 int main(int argc, char **argv) {
   using namespace deployment;
   try {
-    // thông số ng dùng nhập
+    if (argc == 2 && std::string(argv[1]) == "--help") {
+      std::cout << "Run from deployment_cpp14 after prepare.\n"
+                   "hardware_runner --mode fixed|actor_adapt|critic_adapt|full_adapt\n"
+                   "Defaults: hardware_trial_inputs/{initial.model,hardware.settings,reference.csv},\n"
+                   "/dev/ttyACM0, duration 60s, seed 0, new hardware_runs directory.\n"
+                   "Options: --model --settings --reference --output --device --input\n"
+                   "         --duration --seed --startup-discard-ms\n"
+                   "Shadow by default. Drive requires --drive and explicit\n"
+                   "--x0 X --y0 Y --yaw0-deg DEG; shorthand drive waits for r, q stops.\n"
+                   "Use --keyboard for explicit drive. No replay drive.\n";
+      return 0;
+    }
     auto o = options(argc, argv);
     std::map<std::string, Mode> modes{{"fixed", Mode::Fixed},
                                       {"actor_adapt", Mode::ActorAdapt},
@@ -245,8 +275,10 @@ int main(int argc, char **argv) {
     odom_cfg.yaw0 = o.yaw ? o.yaw0 : path.rows().front().state[2];
     Odometry odom(odom_cfg);
     
+    if (o.output.empty()) o.output = default_output(o);
     ensure(::mkdir(o.output.c_str(), 0755) == 0,
            "Output directory exists or cannot be created");
+    std::cerr << "Output: " << o.output << '\n';
     copy_file(o.model, o.output + "/initial.model");
     copy_file(o.settings, o.output + "/settings.txt");
     copy_file(o.reference, o.output + "/reference.csv");
@@ -257,7 +289,7 @@ int main(int argc, char **argv) {
     for (auto name : {"error", "next_error"})
       for (int j = 0; j < 6; j++)
         transitions << ',' << name << j;
-    transitions << '\n';
+    transitions << ",feedback_ms,observe_total_ms,actor_update_ms,critic_evaluate_ms,critic_update_ms,run_ack_wait_ms\n";
     std::ofstream raw(o.output + "/rx.log", std::ios::binary),
         tx(o.output + "/tx.log", std::ios::binary),
         events(o.output + "/events.csv"), log(o.output + "/control.csv"),
@@ -285,7 +317,7 @@ int main(int argc, char **argv) {
            j++)
         log << ',' << k << j;
     }
-    log << '\n';
+    log << ",slot_host_s,period_ms,reference_ms,feature_ms,actor_proposal_ms,warm_start_ms,command_mapping_ms,proposal_total_ms,feedback_ms,control_compute_ms\n";
     states << std::setprecision(17)
            << "host_s,packet_seq,tx_ms,imu_ms,accepted,status,X,Y,yaw,vx,r,"
               "system_status,system_error\n";
@@ -349,6 +381,14 @@ int main(int argc, char **argv) {
     double drive_lateness_max_ms = 0, feedback_sum_ms = 0,
            feedback_max_ms = 0, drive_compute_max_ms = 0;
     std::vector<double> solve_times;
+    std::vector<double> period_times, compute_times, actor_times, reference_times,
+        feature_times, mapping_times, proposal_times, warm_start_times, ack_wait_times,
+        actor_update_times, critic_evaluate_times, critic_update_times, observe_times;
+    auto previous_slot = Clock::time_point{};
+    double run_ack_wait_ms = 0;
+    auto elapsed_ms = [](Clock::time_point t) {
+      return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+    };
     std::string reason = "completed", buffer;
     bool line_overflow = false;
     int exit_code = 0;
@@ -408,6 +448,8 @@ int main(int argc, char **argv) {
             stop("run_not_confirmed");
             return;
           }
+          run_ack_wait_ms = elapsed_ms(sent_at);
+          ack_wait_times.push_back(run_ack_wait_ms);
           session.accept();
           ack_ms = ack.ms;
           phase = Feedback;
@@ -527,6 +569,7 @@ int main(int argc, char **argv) {
         stop("drive_slot_deadline");
         return;
       }
+      double feedback_this_ms = 0;
       if (phase == Feedback) {
         auto after = static_cast<std::uint32_t>(latest.read_start_ms - ack_ms);
         if (after == 0 || after >= 0x80000000U)
@@ -536,6 +579,12 @@ int main(int argc, char **argv) {
         auto update = session.feedback(pose, false, truncating);
         const double feedback_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - feedback_begin).count();
+        feedback_this_ms = feedback_ms;
+        observe_times.push_back(update.observe_total_ms);
+        critic_evaluate_times.push_back(update.critic_evaluate_ms);
+        if (update.batch_size) actor_update_times.push_back(update.actor_update_ms);
+        if (o.mode == "critic_adapt" || o.mode == "full_adapt")
+          critic_update_times.push_back(update.critic_update_ms);
         ++feedback_count;
         feedback_sum_ms += feedback_ms;
         feedback_max_ms = std::max(feedback_max_ms, feedback_ms);
@@ -547,7 +596,9 @@ int main(int argc, char **argv) {
         for (const auto &v : {current.error, session.next_error()})
           for (double x : v)
             transitions << ',' << x;
-        transitions << '\n';
+        transitions << ',' << feedback_ms << ',' << update.observe_total_ms
+                    << ',' << update.actor_update_ms << ',' << update.critic_evaluate_ms
+                    << ',' << update.critic_update_ms << ',' << run_ack_wait_ms << '\n';
         transitions.flush();
         ensure(bool(transitions), "Transition log failed");
         event("learning", latest.sequence,
@@ -585,6 +636,21 @@ int main(int argc, char **argv) {
         }
       }
       current = session.propose(pose);
+      const double proposal_ms = elapsed_ms(start);
+      const double compute_ms = elapsed_ms(slot_begin);
+      const double slot_host_s = std::chrono::duration<double>(slot_begin - origin).count();
+      const bool has_period = previous_slot != Clock::time_point{};
+      const double period_ms = has_period
+          ? std::chrono::duration<double, std::milli>(slot_begin - previous_slot).count() : 0;
+      previous_slot = slot_begin;
+      if (has_period && !o.device.empty()) period_times.push_back(period_ms);
+      compute_times.push_back(compute_ms);
+      actor_times.push_back(current.actor_proposal_ms);
+      reference_times.push_back(current.reference_ms);
+      feature_times.push_back(current.feature_ms);
+      mapping_times.push_back(current.command_mapping_ms);
+      proposal_times.push_back(proposal_ms);
+      warm_start_times.push_back(current.warm_start_ms);
       solve_times.push_back(current.solve_ms);
       step++;
       last_imu = latest.imu_ms;
@@ -606,7 +672,12 @@ int main(int argc, char **argv) {
             current.sigma, current.latent, current.reference})
         for (double x : v)
           log << ',' << x;
-      log << '\n';
+      log << ',' << slot_host_s << ',';
+      if (has_period && !o.device.empty()) log << period_ms;
+      log << ',' << current.reference_ms << ',' << current.feature_ms
+          << ',' << current.actor_proposal_ms << ',' << current.warm_start_ms
+          << ',' << current.command_mapping_ms << ',' << proposal_ms
+          << ',' << feedback_this_ms << ',' << compute_ms << '\n';
       log.flush();
       ensure(bool(log), "Control log failed");
       if (current.reached) {
@@ -768,6 +839,29 @@ int main(int argc, char **argv) {
                                                       (solve_times.size() - 1))]
               << "\nsolve_max_ms=" << solve_times.back() << '\n';
     }
+    auto profile = [&](const std::string &name, std::vector<double> &v) {
+      if (v.empty()) return;
+      double sum = 0;
+      for (double x : v) sum += x;
+      std::sort(v.begin(), v.end());
+      summary << name << "_count=" << v.size() << '\n'
+              << name << "_mean_ms=" << sum / v.size() << '\n'
+              << name << "_p95_ms=" << v[static_cast<std::size_t>(.95 * (v.size()-1))] << '\n'
+              << name << "_max_ms=" << v.back() << '\n';
+    };
+    profile("period", period_times);
+    profile("control_compute", compute_times);
+    profile("reference", reference_times);
+    profile("feature", feature_times);
+    profile("actor_proposal", actor_times);
+    profile("warm_start", warm_start_times);
+    profile("command_mapping", mapping_times);
+    profile("proposal_total", proposal_times);
+    profile("run_ack_wait", ack_wait_times);
+    profile("observe_total", observe_times);
+    profile("actor_update", actor_update_times);
+    profile("critic_evaluate", critic_evaluate_times);
+    profile("critic_update", critic_update_times);
     summary.flush();
     ensure(bool(summary) && bool(raw) && bool(states),
            "Final log write failed");

@@ -111,3 +111,35 @@ không học từ transition chưa đủ dữ liệu. Chỉ sau khi kiểm thử
 thành kiểm tra firmware, ngắt nguồn motor, servo/PID/watchdog trong
 HARDWARE_EXPERIMENT.md mới xét đến drive bench. Không chạy xe trên sàn chỉ
 vì Shadow hoặc PTY đã đạt.
+
+## Native C++ CLI and profiling
+
+After prepare, run from deployment_cpp14 with motor power disconnected:
+
+```sh
+./build/hardware_runner --mode fixed
+```
+
+Use one of fixed, actor_adapt, critic_adapt, full_adapt per trial. No Python
+launcher needed. Defaults use hardware_trial_inputs, /dev/ttyACM0, seed 0,
+60 seconds, unique output directory hardware_runs/<kind>_<mode>_<epoch_us>_<pid>.
+Explicit --model/--settings/--reference/--output/--device/--input still work.
+--help prints usage. Shorthand --drive automatically enables keyboard r/q
+and still requires explicit --x0 --y0 --yaw0-deg; explicit legacy CLI behavior
+is unchanged for existing test harnesses. Do not run drive on the floor yet.
+
+control.csv appends slot_host_s (start before feedback), period_ms (live only,
+first blank), reference_ms, feature_ms, actor_proposal_ms (inference, sampling,
+weight mapping and controller bookkeeping), warm_start_ms, command_mapping_ms,
+proposal_total_ms and feedback_ms (zero if no feedback), control_compute_ms
+(start of slot to proposal end, includes feedback and transition logging but
+excludes control CSV write and UART transmission). Existing solve_ms includes
+set_step and evaluate_and_solve, not just the QP solve. Drive compute max still
+includes control logging. transitions.csv appends feedback_ms, observe_total_ms
+(transactional copy + learning), actor_update_ms (actual update; batch advantage
+calculation included), critic_evaluate_ms, critic_update_ms, run_ack_wait_ms
+(host time after RUN write/log to parsed matching ACK; not motor response).
+No updates in shadow; unavailable update/ACK summary metrics are omitted.
+Summary adds count, mean, p95 and max for each measured stage. Keep replay
+period blank because it is not real-time execution. Logs are not hard-real-time
+proof; profiling adds some overhead. Verify CTest and live shadow again.
