@@ -189,3 +189,10 @@ active_start_host_s, active_duration_s (excludes STOP confirmation), final_stop_
 final_stop_status, final_stop_confirmed, final_stop_ack_wait_ms and exit_code.
 Regression covers delayed keyboard start, valid STOP ACK, missing ACK, wrong
 sequence and armed ACK. Keep motor and servo supply disconnected for retest.
+
+### Neutral watchdog integration check
+
+After confirming the earlier encoder/PID calibration still applies, use the
+short independent test described in HARDWARE_EXPERIMENT.md section 7. Build
+hardware_watchdog_check and run with motor AND servo disconnected. This is
+not a physical stop test; it exercises neutral CTL/ACK, silence and disarm.

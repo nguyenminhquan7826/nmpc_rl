@@ -160,7 +160,8 @@ bên dưới chỉ dùng sau các kiểm tra đó:
 
 Thêm `--keyboard` cùng `--drive` để chờ phím `r` trước khi ARM.
 Nhấn `q` để gửi STOP và kết thúc lượt, không cần Enter. Chế độ này cần
-terminal tương tác. `--duration` tính cả thời gian chờ. Firmware watchdog
+terminal tương tác. `--duration` của Drive tính từ RUN đầu tiên, không tính
+thời gian chờ. `--start-timeout` mặc định 60s. Firmware watchdog
 vẫn xử lý trường hợp mất liên lạc với Pi.
 
 Startup: bỏ dữ liệu cũ1000ms → STOP/ACK đồng bộ sequence → mẫu khỏe và xe đứng
@@ -222,3 +223,30 @@ serial bị chiếm và STOP khi thoát. Các kiểm thử này không phải ki
   bại, và góc servo lượng tử vượt giới hạn. Có regression tests tương ứng.
 
 Các con số này là kiểm chứng phần mềm host, không phải kết quả thực nghiệm xe.
+
+## 7. Kiểm tra tích hợp rút gọn trước thử nghiệm có chuyển động
+
+Encoder/PID đã được hiệu chuẩn ở dự án trước theo xác nhận của người thực hiện.
+Không tuning lại, nhưng vẫn cần kiểm chứng tích hợp CTL/ACK, watchdog và hướng
+tác động. Trước tiên ngắt cả nguồn motor và servo, giữ nguồn logic STM32/Pi.
+Đóng mọi chương trình sử dụng serial. Chạy:
+
+```sh
+./build/hardware_watchdog_check --confirm-disconnected
+```
+
+C++14, không cần model/reference/CasADi solver. Chỉ hỗ trợ lệnh tốc độ 0,
+servo75. STOP/ACK, kiểm tra telemetry khỏe và đứng yên, ARM/ACK, RUN/ACK neutral,
+ngừng gửi lệnh 450ms trong khi vẫn nhận telemetry. Gửi đúng một RUN neutral
+để kiểm tra disarm: ACK reason3, armed0, last_seq không đổi; rồi STOP/ACK.
+Nếu lỗi, gửi STOP và thoát khác 0; không tự ARM lại. Không có chế độ gửi
+tốc độ/góc khác. PTY kiểm tra cả MCU có và không tự disarm.
+
+PASS_NEUTRAL_DISARM là bằng chứng disarm sau im lặng với telemetry khỏe,
+phù hợp cơ chế watchdog, không phân biệt chắc chắn mọi nguyên nhân disarm khác
+và không chứng minh PWM vật lý hay xe đã đứng lại. TEL2 PWM/servo chỉ là giá trị
+firmware báo cáo. Không thay thế phép đo tại driver. Cần giữ nguồn motor tắt
+cho tới khi kiểm tra hướng servo (motor vẫn tắt), hướng motor và STOP vật lý
+với bánh được kê an toàn và công tắc cắt nguồn độc lập. Chỉ chuyển sang chạy
+Fixed đường thẳng 2m sau khi các kiểm tra đạt. Không dùng final.model từ lượt
+bench đứng yên để khởi tạo thực nghiệm.
