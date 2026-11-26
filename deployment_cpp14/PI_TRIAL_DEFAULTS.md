@@ -85,8 +85,29 @@ chuẩn bị dữ liệu và gọi binary, không tham gia vòng điều khiển
 
 Live shadow dùng mốc steady_clock của Pi, chu kỳ lấy từ hardware.settings,
 không đợi chênh timestamp MCU >= Ts. Mỗi bước vẫn cần mẫu IMU mới; nếu trễ,
-bỏ qua slot đã quá hạn/slot quá gần, không chạy bù. Replay và Drive vẫn giữ
-lập lịch cũ; không dùng kết quả shadow để tuyên bố Drive đã đạt 80 ms.
+bỏ qua slot đã quá hạn/slot quá gần, không chạy bù. Replay vẫn giữ
+lập lịch theo timestamp MCU; không dùng kết quả shadow để tuyên bố Drive đã đạt 80 ms.
 Kiểm tra scheduler=host_periodic_shadow, shadow_missed_slots,
 shadow_lateness_max_ms trong summary.txt và host_s trong control.csv.
 Giữ motor mất nguồn; chưa chạy Drive nếu chưa kiểm chứng lập lịch ACK/feedback.
+
+## Kiểm chứng bộ lập lịch Drive (chưa xác nhận trên xe)
+
+Drive dùng mốc host định kỳ giống Shadow, nhưng không bỏ qua slot để chạy tiếp.
+Phải có ACK đúng sequence và mẫu IMU mới có read_start sau ACK. Khoảng thời gian
+MCU giữa hai mẫu feedback phải gần Ts (với Ts=80ms: 65..95ms). Nếu quá mốc slot
+10ms mà không có feedback phù hợp, dừng với drive_slot_deadline. Nếu khoảng
+feedback quá lớn, dừng drive_feedback_interval. Không dùng mẫu cũ hay chạy bù.
+Tính cả feedback/học, proposal, solver và ghi log trong ngân sách; dành 20ms
+cho ghi UART trước slot kế tiếp. Giữ nguyên watchdog và cơ chế STOP.
+Summary thêm scheduler=host_periodic_drive, drive_deadline_misses,
+drive_lateness_max_ms, drive_compute_max_ms, feedback_count,
+feedback_mean_ms, feedback_max_ms. Đây là các ngưỡng bảo thủ để kiểm thử,
+không phải giới hạn đã xác nhận bằng đo lường phần cứng.
+
+Build rồi chạy ctest --test-dir build --output-on-failure. PTY mới kiểm tra
+clock MCU 39ms / host 40ms, ACK và mất feedback: không gửi RUN thứ tư,
+không học từ transition chưa đủ dữ liệu. Chỉ sau khi kiểm thử đạt và hoàn
+thành kiểm tra firmware, ngắt nguồn motor, servo/PID/watchdog trong
+HARDWARE_EXPERIMENT.md mới xét đến drive bench. Không chạy xe trên sàn chỉ
+vì Shadow hoặc PTY đã đạt.

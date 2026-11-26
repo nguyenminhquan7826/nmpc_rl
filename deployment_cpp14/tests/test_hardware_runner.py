@@ -80,6 +80,50 @@ class Tests(unittest.TestCase):
    finally:
     if proc.poll() is None:proc.kill();proc.wait()
     os.close(master);os.close(slave)
+ def test_periodic_drive_ack_and_feedback_deadline(self):
+  # 39 ms increments on MCU, 40 ms on host. At an 80 ms host slot
+  # a 78 ms feedback interval must be accepted. Withhold feedback
+  # after the third acknowledged RUN: no fourth RUN is permitted.
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d);args=setup(p);master,slave=pty.openpty()
+   os.set_blocking(master,False)
+   proc=subprocess.Popen([str(EXE),*args,'--device',os.ttyname(slave),
+    '--startup-discard-ms','0','--duration','2','--mode','critic_adapt',
+    '--drive','--x0','0','--y0','0','--yaw0-deg','0'],
+    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    start=time.monotonic();seq=1;next_tel=start+.06;buf=b'';last_seq=0;actions=[]
+    run_times=[]
+    while proc.poll() is None and time.monotonic()-start<4:
+     now=time.monotonic()
+     if now>=next_tel and len(run_times)<3 and not(termios.tcgetattr(slave)[3]&termios.ICANON):
+      ms=1000+int((next_tel-start)*975)
+      os.write(master,tel(seq,ms));seq+=1;next_tel+=.04
+     try:buf+=os.read(master,4096)
+     except BlockingIOError:pass
+     while b'\n' in buf:
+      line,buf=buf.split(b'\n',1);v=line.decode().strip().split(',')
+      if v[0]!='CTL':continue
+      req=int(v[2]);action=v[3];actions.append(action)
+      if action!='STOP':last_seq=req
+      if action=='RUN':run_times.append(time.monotonic())
+      ms=1000+int((time.monotonic()-start)*975)
+      os.write(master,wire(f'ACK,1,{req},{int(action!="STOP")},0,{ms},{last_seq}'))
+     time.sleep(.001)
+    out,err=proc.communicate(timeout=2);self.assertEqual(proc.returncode,2,out+err)
+    summary=dict(x.split('=',1) for x in (p/'out/summary.txt').read_text().splitlines())
+    self.assertEqual(summary['scheduler'],'host_periodic_drive')
+    self.assertEqual(summary['reason'],'drive_slot_deadline')
+    self.assertEqual(summary['drive_deadline_misses'],'1')
+    self.assertEqual(summary['critic_updates'],'2')
+    self.assertEqual(len(run_times),3)
+    self.assertTrue(all(.065<=b-a<=.095 for a,b in zip(run_times,run_times[1:])),run_times)
+    tx=[row.split(',')[3] for row in (p/'out/tx.log').read_text().splitlines()]
+    self.assertEqual(tx[:5],['STOP','ARM','RUN','RUN','RUN'])
+    self.assertTrue(tx[5:] and set(tx[5:])=={'STOP'})
+   finally:
+    if proc.poll() is None:proc.kill();proc.wait()
+    os.close(master);os.close(slave)
  def test_drive_missing_ack_stops_and_never_sends_run(self):
   self.assertTrue(EXE.is_file(),'hardware_runner target missing')
   with tempfile.TemporaryDirectory() as d:

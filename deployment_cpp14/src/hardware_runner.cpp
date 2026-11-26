@@ -331,16 +331,23 @@ int main(int argc, char **argv) {
     Telemetry latest{};
     Pose pose;
     HardwareStep current;
-    auto last_host = Clock::now(), sent_at = Clock::now(),
-         last_step_at = Clock::now();
-    // Live shadow uses a phase-locked host clock. Drive/replay keep their
-    // original sensor/ACK timing until the new schedule is validated on Pi.
+    auto last_host = Clock::now(), sent_at = Clock::now();
+    // Both live modes use phase-locked host time. Drive fails closed if
+    // ACK or fresh feedback cannot meet the slot; replay uses MCU time.
     const bool live_shadow = !o.drive && !o.device.empty();
     const auto shadow_period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(session.period()));
     auto shadow_next = Clock::time_point{};
     std::size_t shadow_missed_slots = 0;
     double shadow_lateness_max_ms = 0;
+    auto drive_next = Clock::time_point{};
+    // Conservative experimental bounds, not a hardware timing guarantee.
+    const auto drive_grace = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(std::min(.010, session.period() / 8)));
+    const double feedback_tolerance = std::min(.015, session.period() * .2);
+    std::size_t drive_deadline_misses = 0, feedback_count = 0;
+    double drive_lateness_max_ms = 0, feedback_sum_ms = 0,
+           feedback_max_ms = 0, drive_compute_max_ms = 0;
     std::vector<double> solve_times;
     std::string reason = "completed", buffer;
     bool line_overflow = false;
@@ -375,6 +382,10 @@ int main(int argc, char **argv) {
           return;
         if (phase != SyncStop && phase != ArmAck && phase != RunAck)
           return;
+        if (seconds(sent_at) > ack_timeout) {
+          stop("ack_timeout");
+          return;
+        }
         if (ack.reason != 0) {
           stop("command_rejected");
           return;
@@ -462,6 +473,12 @@ int main(int argc, char **argv) {
       }
       if (!have)
         return;
+      // Check even while waiting for RUN ACK, not just when feedback arrives.
+      if (o.drive && have_step && Clock::now() > drive_next + drive_grace) {
+        ++drive_deadline_misses;
+        stop("drive_slot_deadline");
+        return;
+      }
       if (phase == WaitHealthy) {
         if (!start_requested)
           return;
@@ -483,23 +500,45 @@ int main(int argc, char **argv) {
         if (Clock::now() < shadow_next)
           return;
       }
-      if (have_step && !live_shadow) {
+      if (have_step && o.drive) {
+        if (Clock::now() < drive_next)
+          return;
+        const double delta =
+            static_cast<std::uint32_t>(latest.imu_ms - last_imu) * .001;
+        // MCU elapsed time is a feedback validity check, not the scheduler.
+        // A 78/79 ms sample is usable; a 40/120 ms transition is not.
+        if (delta + 1e-6 < session.period() - feedback_tolerance)
+          return;
+        if (delta > session.period() + feedback_tolerance + 1e-6) {
+          stop("drive_feedback_interval");
+          return;
+        }
+      }
+      if (have_step && !live_shadow && !o.drive) {
         const auto delta =
             static_cast<std::uint32_t>(latest.imu_ms - last_imu) * .001;
         if (delta + 1e-6 < session.period())
           return;
-        if (o.drive && (delta > session.period() + .035 ||
-                        seconds(last_step_at) > session.period() + .05)) {
-          stop("control_step_gap");
-          return;
-        }
+      }
+      const auto slot_begin = Clock::now();
+      const auto slot_due = o.drive && have_step ? drive_next : slot_begin;
+      if (o.drive && have_step && slot_begin > slot_due + drive_grace) {
+        ++drive_deadline_misses;
+        stop("drive_slot_deadline");
+        return;
       }
       if (phase == Feedback) {
         auto after = static_cast<std::uint32_t>(latest.read_start_ms - ack_ms);
         if (after == 0 || after >= 0x80000000U)
           return;
         bool truncating = seconds(origin) + session.period() >= o.duration;
+        const auto feedback_begin = Clock::now();
         auto update = session.feedback(pose, false, truncating);
+        const double feedback_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - feedback_begin).count();
+        ++feedback_count;
+        feedback_sum_ms += feedback_ms;
+        feedback_max_ms = std::max(feedback_max_ms, feedback_ms);
         transitions << seconds(origin) << ',' << expected << ',' << last_imu
                     << ',' << latest.imu_ms << ',' << ack_ms << ','
                     << session.reward() << ',' << update.td << ','
@@ -523,6 +562,12 @@ int main(int argc, char **argv) {
         }
       }
       auto start = Clock::now();
+      if (o.drive) {
+        drive_lateness_max_ms = std::max(
+            drive_lateness_max_ms,
+            std::chrono::duration<double, std::milli>(slot_begin - slot_due).count());
+        drive_next = slot_due + shadow_period;
+      }
       if (live_shadow) {
         if (!have_step) {
           shadow_next = start + shadow_period;
@@ -544,7 +589,6 @@ int main(int argc, char **argv) {
       step++;
       last_imu = latest.imu_ms;
       have_step = true;
-      last_step_at = start;
       log << seconds(origin) << ',' << step << ',' << o.mode << ','
           << latest.imu_ms << ',' << pose.x << ',' << pose.y << ',' << pose.yaw
           << ',' << pose.vx << ",0," << pose.r << ',' << current.progress << ','
@@ -584,13 +628,29 @@ int main(int argc, char **argv) {
           stop("command_clipped");
           return;
         }
-        if (seconds(start) >= session.period()) {
+        // Include feedback, learning, proposal and logging in the budget.
+        // Reserve the existing serial write bound before starting RUN.
+        drive_compute_max_ms = std::max(
+            drive_compute_max_ms,
+            std::chrono::duration<double, std::milli>(Clock::now() - slot_begin).count());
+        if (Clock::now() + std::chrono::milliseconds(20) >= drive_next) {
+          ++drive_deadline_misses;
           stop("loop_deadline");
           return;
         }
         if (check_keyboard())
           return;
+        if (seconds(origin) >= o.duration) {
+          session.cancel();
+          reason = "duration_completed";
+          return;
+        }
         transmit("RUN", current.command.speed, current.command.servo);
+        if (Clock::now() >= drive_next) {
+          ++drive_deadline_misses;
+          stop("run_write_deadline");
+          return;
+        }
         phase = RunAck;
       } else {
         session.cancel();
@@ -681,8 +741,18 @@ int main(int argc, char **argv) {
             << "\nactor_updates=" << session.actor_updates()
             << "\ncritic_updates=" << session.critic_updates()
             << "\nvy_assumed_zero=1\nkalman_used=0\n"
-            << "scheduler=" << (live_shadow ? "host_periodic_shadow" : "imu_sample_gated")
+            << "scheduler=" << (o.drive ? "host_periodic_drive" :
+                                 live_shadow ? "host_periodic_shadow" : "imu_sample_gated")
             << '\n';
+    if (o.drive) {
+      summary << "drive_deadline_misses=" << drive_deadline_misses
+              << "\ndrive_lateness_max_ms=" << drive_lateness_max_ms
+              << "\ndrive_compute_max_ms=" << drive_compute_max_ms
+              << "\nfeedback_count=" << feedback_count
+              << "\nfeedback_mean_ms="
+              << (feedback_count ? feedback_sum_ms / feedback_count : 0)
+              << "\nfeedback_max_ms=" << feedback_max_ms << '\n';
+    }
     if (live_shadow) {
       summary << "shadow_missed_slots=" << shadow_missed_slots
               << "\nshadow_lateness_max_ms=" << shadow_lateness_max_ms << '\n';
