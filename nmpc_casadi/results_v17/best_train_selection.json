@@ -1,0 +1,15 @@
+{
+  "type": "BEST_STOCHASTIC_TRAIN",
+  "episode_1based": 500,
+  "criterion": "reached_end_and_solver_success_at_least_99_pct_then_min_mean_cte_m",
+  "mean_cte_m": 0.017073514570609457,
+  "mean_reward_paper": -0.2504220855682252,
+  "solver_success_pct": 100.0,
+  "reached_end": true,
+  "source": "TRAIN_ONLY",
+  "not_frozen_evaluation": true,
+  "checkpoint_file": "checkpoint_best_train.npz",
+  "trajectory_file": "episode_best_train.csv",
+  "checkpoint_timing": "after_final_episode_update",
+  "trajectory_role": "actual_online_learning_with_exploration_not_checkpoint_replay"
+}

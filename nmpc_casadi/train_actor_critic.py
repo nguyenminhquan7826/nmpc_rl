@@ -79,6 +79,14 @@ def main(argv=None):
     ap.add_argument("--use-internal-box",action="store_true",
                     help="Use source-defined, formerly screened 20-percent experimental bounds; no external manifest needed")
     ap.add_argument("--box-margin",type=float,default=0.20)
+    ap.add_argument("--allow-cad-reference",action="store_true",
+                    help="Train on a non-pinned CAD XREF (e.g. giun/spiral); skips the TRAIN SHA256 pin. Requires --use-internal-box")
+    ap.add_argument("--reference-b",type=Path,
+                    help="Curriculum: second track B. Episodes before --switch-episode use --reference (A), the rest use B. Same Actor/Critic continue learning")
+    ap.add_argument("--switch-episode",type=int,
+                    help="1-based first episode trained on track B (default: episodes//2+1)")
+    ap.add_argument("--steps-per-episode-b",type=int,
+                    help="Max steps per episode on track B (default: --steps-per-episode)")
     ap.add_argument("--save-at",type=int,nargs="+",
                     help="Save detailed episode CSV and checkpoint only after these 1-based episodes")
     ap.add_argument("--output",type=Path,required=True)
@@ -151,8 +159,32 @@ def main(argv=None):
     if args.save_at is not None and (len(set(args.save_at))!=len(args.save_at)
                                    or any(ep<1 or ep>args.episodes for ep in args.save_at)):
         ap.error("--save-at must contain unique 1-based episodes within the run")
+    if args.allow_cad_reference and not args.use_internal_box:
+        ap.error("--allow-cad-reference requires --use-internal-box")
+    if args.reference_b is not None:
+        if not args.allow_cad_reference:
+            ap.error("--reference-b requires --allow-cad-reference")
+        if args.episodes<2:
+            ap.error("--reference-b needs at least 2 episodes")
+        if args.switch_episode is None:
+            args.switch_episode=args.episodes//2+1
+        if not 2<=args.switch_episode<=args.episodes:
+            ap.error("--switch-episode must be in [2, episodes]")
+        if args.steps_per_episode_b is None:
+            args.steps_per_episode_b=args.steps_per_episode
+        if args.steps_per_episode_b<1:
+            ap.error("--steps-per-episode-b must be positive")
+    elif args.switch_episode is not None or args.steps_per_episode_b is not None:
+        ap.error("--switch-episode/--steps-per-episode-b require --reference-b")
     try:
-        ref,digest=verify_train_reference(args.reference)
+        if args.allow_cad_reference:
+            from cad_eval_reference import sha256_file
+            ref=args.reference.expanduser().resolve(strict=True)
+            if ref.suffix.lower()!=".csv":
+                raise ValueError("Expected a CAD XREF CSV")
+            digest=sha256_file(ref)
+        else:
+            ref,digest=verify_train_reference(args.reference)
         if args.use_internal_box:
             lo,hi=screening_box(args.box_margin)
             screen_doc={
@@ -182,7 +214,7 @@ def main(argv=None):
                                abs(float(b.cfg["u_max"][1]))))
     if staged["reference_sha256"]!=digest:
         raise RuntimeError("TRAIN reference staging changed the original")
-    if args.use_internal_box:
+    if args.use_internal_box and not args.allow_cad_reference:
         # Flat layout: put supporting trajectory derivatives alongside
         # original pinned TRAIN CSV, NOT in the numerical results folder.
         import shutil
@@ -205,9 +237,34 @@ def main(argv=None):
             else:
                 shutil.move(str(source_derivative),str(target))
             staged[key]=str(target)
-    b.REF_INFO=ref_info
-    b.TAIL_FILE=Path(staged["tail_file"])
-    b.CAD_S_END=float(ref_info["cad_s_end"])
+    stage_kwargs=dict(
+        min_speed_mps=float(b.cfg["vx_min"]),
+        max_speed_mps=min(float(b.TEST_SPEED_MPS),float(b.cfg["vx_max"])),
+        wheelbase_m=float(b.WHEELBASE_M),
+        steering_limit_rad=min(abs(float(b.cfg["u_min"][1])),
+                               abs(float(b.cfg["u_max"][1]))))
+    # Each track = its own reference, virtual tail, length and step budget.
+    tracks=[{"name":"A","file":str(ref),"sha256":digest,"ref_info":ref_info,
+             "tail":Path(staged["tail_file"]),
+             "s_end":float(ref_info["cad_s_end"]),
+             "steps":args.steps_per_episode}]
+    if args.reference_b is not None:
+        from cad_eval_reference import sha256_file
+        ref_b=args.reference_b.expanduser().resolve(strict=True)
+        ref_info_b,staged_b=prepare_cad_evaluation_reference(
+            ref_b,out/"track_b",b.TAIL_LENGTH_M,**stage_kwargs)
+        tracks.append({"name":"B","file":str(ref_b),"sha256":sha256_file(ref_b),
+                       "ref_info":ref_info_b,"tail":Path(staged_b["tail_file"]),
+                       "s_end":float(ref_info_b["cad_s_end"]),
+                       "steps":args.steps_per_episode_b})
+
+    def activate_track(track):
+        """Point the NMPC reference globals at this track before env.reset()."""
+        b.REF_INFO=track["ref_info"]
+        b.TAIL_FILE=track["tail"]
+        b.CAD_S_END=track["s_end"]
+
+    activate_track(tracks[0])
     q0,r0,p0=LEARNING_INITIAL.arrays()
     rng=np.random.default_rng(args.seed)
     actor=GaussianWeightActor(
@@ -224,7 +281,8 @@ def main(argv=None):
         ey=args.ey,heading_deg=args.heading_deg)
     meta={
         "status":"EXPERIMENTAL_SIMULATION_ONLY_NOT_STABILITY_CERTIFIED",
-        "reference_role":"TRAIN_ONLY","train_sha256":digest,
+        "reference_role":("CAD_TRAIN_UNPINNED" if args.allow_cad_reference else "TRAIN_ONLY"),
+        "train_reference_file":str(ref),"train_sha256":digest,
         "train_length_m":b.CAD_S_END,"Ts_s":b.Ts,"N":b.N,
         "initial_Q":q0.tolist(),"initial_R":r0.tolist(),
         "initial_P":p0.tolist(),
@@ -270,14 +328,24 @@ def main(argv=None):
         "offline_empirical_screen_count":screen_doc["total_samples"],
         "staging_detail":"Generic CAD reference-tail utility used only to stage TRAIN; no TEST inputs",
         "terminal_conditions_certified":False,
+        "curriculum":(None if len(tracks)==1 else {
+            "type":"first_episodes_track_A_then_track_B_same_agent",
+            "switch_episode_1based":args.switch_episode,
+            "tracks":[{k:t[k] for k in ("name","file","sha256","s_end","steps")}
+                      for t in tracks]}),
     }
     (out/"run_config.json").write_text(json.dumps(meta,indent=2),encoding="utf-8")
     history=[]
     best_train_index=None
     for ep in range(args.episodes):
+        track=(tracks[1] if len(tracks)>1 and ep+1>=args.switch_episode
+               else tracks[0])
+        activate_track(track)
+        env.train_length_m=track["s_end"]
+        env.max_steps=track["steps"]
         obs=env.reset()
         rows=[]
-        for step in range(args.steps_per_episode):
+        for step in range(track["steps"]):
             proposal=actor.propose(obs.features,deterministic=False)
             p_before=critic.p
             next_obs,reward,terminated,truncated,info=env.step(
@@ -342,7 +410,8 @@ def main(argv=None):
         if args.save_at is None or (ep+1) in args.save_at:
             df.to_csv(out/f"episode_{ep:04d}.csv",index=False)
         record={
-            "episode":ep,"steps":len(df),
+            "episode":ep,"track":track["name"],
+            "track_file":Path(track["file"]).name,"steps":len(df),
             "return":float(df.reward.sum()),
             "mean_reward":float(df.reward.mean()),
             "training_return":float(df.training_reward.sum()),

@@ -16,18 +16,27 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 TRAJECTORY_DIR = BASE_DIR / "reference_split"
-RESULTS_DIR = BASE_DIR / "results_v15"
-IMAGES_DIR = BASE_DIR / "images_v15"
-TRAIN_CSV = TRAJECTORY_DIR / "test_xref.csv"
+RESULTS_DIR = BASE_DIR / "results_v20"
+IMAGES_DIR = BASE_DIR / "images_v20"
+TRAIN_CSV = TRAJECTORY_DIR / "spiral_xref.csv"  # track A: first 50% of episodes
 # Optional only if your original pinned TRAIN lives in another checkout
 # and the bounded automatic local search cannot locate it:
 # TRAIN_CSV_SOURCE = Path(r"D:\\your\\old\\project\\reference_split\\train_xref.csv")
 TRAIN_CSV_SOURCE = None
+# CAD track (spiral/giun) is detected automatically: any CSV other than the
+# pinned train_xref.csv is trained as an unpinned CAD track.
+
+# Curriculum (optional): first half of episodes on TRAIN_CSV (track A),
+# second half on TRAIN_CSV_B (track B); the SAME Actor/Critic keep learning.
+# None = train only on TRAIN_CSV (old behaviour).
+TRAIN_CSV_B = TRAJECTORY_DIR / "giun_xref.csv"  # track B: last 50%; None = single track
+SWITCH_EPISODE = "half"  # "half" -> EPISODES//2+1; or a 1-based episode number
+STEPS_PER_EPISODE_B = "auto"
 
 # Keep strictly away from TEST until all training decisions are fixed.
 EPISODES = 500
-STEPS_PER_EPISODE = 1150
-CHECKPOINT_EPISODES = (1, 10, 25, 50, 100)
+STEPS_PER_EPISODE = "auto"  # auto from track length (spiral~9990, giun~1240, train~1180); or set an int
+CHECKPOINT_EPISODES = (1, 50, 100, 250, 251, 300, 400, 500)  # 250=last spiral, 251=first giun
 GAMMA = 0.94
 # good gamma = 0.92
 SEED = 0

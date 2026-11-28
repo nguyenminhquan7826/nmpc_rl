@@ -46,8 +46,10 @@ def load_frozen_agents(checkpoint, low, high, *, expected_gamma=0.90):
         if "metadata" not in saved:
             raise ValueError("Checkpoint missing training metadata")
         config=json.loads(str(saved["metadata"].item()))
-        if (config.get("reference_role")!="TRAIN_ONLY" or
-            config.get("train_sha256")!=TRAIN_REFERENCE_SHA256 or
+        pinned_ok=(config.get("reference_role")=="TRAIN_ONLY" and
+                   config.get("train_sha256")==TRAIN_REFERENCE_SHA256)
+        cad_ok=config.get("reference_role")=="CAD_TRAIN_UNPINNED"
+        if (not (pinned_ok or cad_ok) or
             config.get("gamma")!=expected_gamma or
             config.get("Qe_fixed")!=Q_EVAL_CANDIDATE.tolist() or
             config.get("Re_fixed")!=R_EVAL_CANDIDATE.tolist() or
